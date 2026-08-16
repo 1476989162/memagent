@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memagent-local"
+dynamic = ["version"]
+description = "Local-first layered memory and autonomous learning engine"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "memagent contributors"}]
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
+keywords = ["agent", "memory", "local-first", "llm", "autonomous-learning"]
+dependencies = []
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "build>=1.2,<2", "twine>=5,<7"]
+
+[project.scripts]
+memagent = "memagent.__main__:main"
+memagent-backup = "memagent.backup:main"
+memagent-release = "memagent.release:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "memagent.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["memagent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

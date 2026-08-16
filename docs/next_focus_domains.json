@@ -1,0 +1,134 @@
+{
+  "generated": "2026-08-15T12:44:25.142949",
+  "fix_round": 114,
+  "gaps": [
+    {
+      "domain": "JSON相关",
+      "before": 7.2,
+      "after": 4.6,
+      "rules": 37,
+      "pitfalls": 10
+    },
+    {
+      "domain": "DataTable",
+      "before": 8.93,
+      "after": 4.8,
+      "rules": 34,
+      "pitfalls": 10
+    },
+    {
+      "domain": "HttpClient",
+      "before": 7.72,
+      "after": 4.8,
+      "rules": 21,
+      "pitfalls": 7
+    },
+    {
+      "domain": "软件加密",
+      "before": 8.07,
+      "after": 4.87,
+      "rules": 38,
+      "pitfalls": 10
+    },
+    {
+      "domain": "高级开发指南-Web数据源",
+      "before": 5.4,
+      "after": 4.9,
+      "rules": 23,
+      "pitfalls": 7
+    },
+    {
+      "domain": "高级开发指南-异步编程",
+      "before": 5.4,
+      "after": 5.0,
+      "rules": 19,
+      "pitfalls": 9
+    },
+    {
+      "domain": "生成图表",
+      "before": 6.0,
+      "after": 6.1,
+      "rules": 31,
+      "pitfalls": 10
+    },
+    {
+      "domain": "高级开发指南-用Excel报表生成网页",
+      "before": 7.4,
+      "after": 6.5,
+      "rules": 25,
+      "pitfalls": 8
+    },
+    {
+      "domain": "高级开发指南-微信接口",
+      "before": 6.7,
+      "after": 6.6,
+      "rules": 20,
+      "pitfalls": 8
+    },
+    {
+      "domain": "OpenQQ",
+      "before": 7.13,
+      "after": 6.8,
+      "rules": 34,
+      "pitfalls": 10
+    }
+  ],
+  "pending": [
+    {
+      "domain": "专业报表",
+      "rules": 31
+    },
+    {
+      "domain": "开发杂项-进阶篇",
+      "rules": 31
+    },
+    {
+      "domain": "开发杂项-基础篇",
+      "rules": 30
+    },
+    {
+      "domain": "ListView",
+      "rules": 27
+    },
+    {
+      "domain": "工作流",
+      "rules": 27
+    },
+    {
+      "domain": "网络相关",
+      "rules": 27
+    },
+    {
+      "domain": "导入导出",
+      "rules": 26
+    },
+    {
+      "domain": "自定义函数",
+      "rules": 26
+    },
+    {
+      "domain": "协同开发",
+      "rules": 25
+    },
+    {
+      "domain": "TreeView",
+      "rules": 23
+    },
+    {
+      "domain": "其他类型",
+      "rules": 20
+    },
+    {
+      "domain": "Excel报表",
+      "rules": 19
+    },
+    {
+      "domain": "Word报表",
+      "rules": 18
+    },
+    {
+      "domain": "条形码",
+      "rules": 18
+    }
+  ]
+}
