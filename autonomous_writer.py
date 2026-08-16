@@ -36,6 +36,11 @@ from memagent.memory import MemoryStore  # noqa: E402
 STORE_PATH = Path(__file__).resolve().parent / "agent_memory.json"
 LOG_PATH = Path(__file__).resolve().parent / "works" / "autonomous.log"
 
+# 每轮是否先跑自主演化（联网查资料 + 新设定入库）。默认开（旧行为）；
+# --no-evolve 关闭——大纲驱动的紧结构作品必须关：演化每轮注入新伏笔，
+# 悬念只加不减从不兑付，是《错季锁星》"谜题通胀、越写越没劲"的根因之一。
+_EVOLVE_ENABLED: bool = True
+
 
 def log(msg: str) -> None:
     line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
@@ -67,13 +72,15 @@ def one_cycle(agent: MemoryAgent, i: int, *, do_critique: bool = True) -> dict:
     arch = ensure_architecture(work_dir, new_title, agent)
     log(f"架构: outline={arch['outline']}  chars={arch['characters']}  world={arch['world']}")
 
-    ev = agent.evolve(with_web=True)
-    if not ev.get("ok"):
-        log(f"演化未执行：{ev.get('reason')}")
-    else:
-        log(f"演化: 主题「{ev['query']}」 联网 {ev['web_n']} 条 · 新增设定 {len(ev['added'])} 条")
-        for s in ev["added"]:
-            log(f"  • {s}")
+    ev = {"ok": False, "reason": "evolve-off"}
+    if _EVOLVE_ENABLED:
+        ev = agent.evolve(with_web=True)
+        if not ev.get("ok"):
+            log(f"演化未执行：{ev.get('reason')}")
+        else:
+            log(f"演化: 主题「{ev['query']}」 联网 {ev['web_n']} 条 · 新增设定 {len(ev['added'])} 条")
+            for s in ev["added"]:
+                log(f"  • {s}")
 
     w = agent.write_chapter()
     if w.get("ok"):
@@ -112,6 +119,63 @@ def one_cycle(agent: MemoryAgent, i: int, *, do_critique: bool = True) -> dict:
                 log(f"  沉淀改进 {n} 条")
                 for imp in crit.improvements[:3]:
                     log(f"    → {imp}")
+                # 读者硬门槛：读者友好度（术语不劝退）与追读欲（爽点兑现/钩子具体）
+                # 取低者，低于 6 分强制重写本章（最多 2 次）——两维任一崩坏都留不住读者
+                # 策略：重写生成新章（章号+1），若达标则删除原章、重命名新章为原章号，保持连续性
+                def _reader_gate(s: dict) -> float:
+                    return min(s.get("读者友好度", 10.0), s.get("追读欲", 10.0))
+
+                reader_score = _reader_gate(crit.scores)
+                rewrite_attempts = 0
+                max_rewrites = 2
+                orig_path = Path(w["path"])
+                orig_no = w["chapter"]
+                while reader_score < 6.0 and rewrite_attempts < max_rewrites:
+                    rewrite_attempts += 1
+                    log(f"  读者友好度 {reader_score:.1f} < 6.0，强制重写第{orig_no}章（第 {rewrite_attempts}/{max_rewrites} 次）…")
+                    result = agent.write_chapter()
+                    if result.get("ok"):
+                        rewrite_path = Path(result["path"])
+                        chapter_text = rewrite_path.read_text(encoding="utf-8")
+                        crit2 = self_critique(
+                            chapter_text=chapter_text,
+                            chapter_no=result["chapter"],
+                            title=result["title"],
+                            responder=agent.responder,
+                            persona_sheet=agent.persona_sheet(),
+                            n_samples=2,
+                            timeout=60.0,
+                        )
+                        if crit2:
+                            reader_score2 = _reader_gate(crit2.scores)
+                            scores2 = ", ".join(f"{k}={v:.1f}" for k, v in crit2.scores.items()) or "无分数"
+                            log(f"  重写自评: {{ {scores2} }}")
+                            if crit2.overall:
+                                log(f"    综合: {crit2.overall[:120]}")
+                            n = persist_improvements(agent, crit2)
+                            log(f"    沉淀改进 {n} 条")
+                            # 达标：用新章内容替换原章，删除多余章
+                            if reader_score2 >= 6.0:
+                                import shutil
+                                # 覆盖原章文件
+                                shutil.copy2(rewrite_path, orig_path)
+                                # 删除重写生成的多余章
+                                try:
+                                    rewrite_path.unlink()
+                                except Exception:
+                                    pass
+                                # 更新 w 指向原章
+                                w = dict(result); w["path"] = str(orig_path); w["chapter"] = orig_no
+                                reader_score = reader_score2
+                            else:
+                                reader_score = reader_score2
+                    else:
+                        log(f"  重写失败：{result.get('reason')}")
+                        break
+                if reader_score >= 6.0:
+                    log(f"  ✓ 读者友好度达标 {reader_score:.1f}（{rewrite_attempts} 次重写）")
+                else:
+                    log(f"  ⚠ 读者友好度仍未达标 {reader_score:.1f}，本章按原样保留")
         else:
             log("自评: 章节为空，跳过")
 
@@ -134,6 +198,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="memagent 自主成长后台")
     parser.add_argument("--persona", default=os.environ.get("OPENAI_PERSONA"),
                         help="人设（novelist/小说家 或自定义文本）")
+    parser.add_argument("--persona-file", default=None,
+                        help="从文件读人设文本（长人设免命令行转义；覆盖 --persona）")
+    parser.add_argument("--store", default=None,
+                        help="记忆库 JSON 路径（默认 agent_memory.json；新书用独立库避免旧书设定污染人设档案）")
+    parser.add_argument("--no-evolve", action="store_true",
+                        help="关闭每轮自主演化（大纲驱动的紧结构作品应关：防谜题通胀）")
     parser.add_argument("--cycles", type=int, default=10, help="循环轮数（默认 10；0=无限）")
     parser.add_argument("--min-interval", type=float, default=120.0,
                         help="轮间最小休息秒数（默认 120）")
@@ -145,24 +215,37 @@ def main() -> int:
                         help="连续写作失败达到该次数后熔断退出（默认 3）")
     args = parser.parse_args()
 
-    instance_lock = FileLock(str(STORE_PATH) + ".autonomous.lock", timeout=0.0)
+    persona = args.persona
+    if args.persona_file:
+        persona = Path(args.persona_file).read_text(encoding="utf-8").strip()
+        if not persona:
+            log(f"警告：--persona-file {args.persona_file} 为空，回退 --persona/环境变量")
+            persona = args.persona
+
+    global _EVOLVE_ENABLED
+    _EVOLVE_ENABLED = not args.no_evolve
+
+    store_path = Path(args.store) if args.store else STORE_PATH
+
+    instance_lock = FileLock(str(store_path) + ".autonomous.lock", timeout=0.0)
     try:
         instance_lock.acquire()
     except LockTimeoutError:
         log("已有自主写作进程在运行，本次启动退出。")
         return 2
 
-    store = MemoryStore(path=str(STORE_PATH)) if STORE_PATH.exists() else MemoryStore()
-    store.path = str(STORE_PATH)
-    agent = MemoryAgent(store=store, persona=args.persona,
-                        cfg=AgentConfig(evolve_on_sleep=True))
-    if not args.persona:
-        log("警告：未设置 persona（建议 --persona novelist）")
+    store = MemoryStore(path=str(store_path)) if store_path.exists() else MemoryStore()
+    store.path = str(store_path)
+    agent = MemoryAgent(store=store, persona=persona,
+                        cfg=AgentConfig(evolve_on_sleep=not args.no_evolve))
+    if not persona:
+        log("警告：未设置 persona（建议 --persona novelist 或 --persona-file）")
 
     log(f"自主成长后台启动：{'无限循环' if args.cycles <= 0 else str(args.cycles) + ' 轮'}，"
         f"轮间休息 {args.min_interval:.0f}~{args.max_interval:.0f}s，"
         f"自评={'开' if not args.no_critique else '关'}")
-    log(f"记忆库: {STORE_PATH}")
+    log(f"记忆库: {store_path}")
+    log(f"演化: {'开（每轮联网+新设定入库）' if _EVOLVE_ENABLED else '关（--no-evolve，大纲驱动）'}")
 
     i = 0
     consecutive_failures = 0
@@ -194,7 +277,7 @@ def main() -> int:
     finally:
         try:
             agent.save()
-            log(f"记忆已保存 → {STORE_PATH}")
+            log(f"记忆已保存 → {store_path}")
         finally:
             instance_lock.release()
     return 0
