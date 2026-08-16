@@ -1441,6 +1441,13 @@ class MemoryAgent:
             pass
 
         d = save_dir or self._work_dir(title)
+        # 读者友好度 post-process：为未内嵌解释的术语注入解释短语
+        try:
+            from .reader_postproc import inject_explanations as _ri
+        except Exception:
+            _ri = None
+        if _ri:
+            text, _inj = _ri(text)
         f = Path(d) / f"第{chapter}章.md"
         header = f"# 《{title}》第{chapter}章"
         if chap_title:

@@ -377,6 +377,19 @@ def _parse_critique(reply: str, chapter_no: int, title: str) -> Critique:
                 crit.scores[name] = float(last)
             except ValueError:
                 pass
+    # 白名单之外的编号评分行也宽容收下（历史维度名/LLM 改名漂移，如
+    # 「露骨场景分寸：10.0」——只认 _DIMENSIONS 会把整维分数丢掉）。
+    # 消费方全部 .get() 取分，多余的键无副作用。
+    known = {name for name, _ in _DIMENSIONS}
+    for m in re.finditer(r"^\s*\d+[.、]\s*([^\s：:=]{2,12})\s*[:：=]\s*(\d+(?:\.\d+)?)\s*(?:/\s*\d+)?\s*分?\s*$",
+                         plain, re.M):
+        name, val = m.group(1), m.group(2)
+        if name in known or name in crit.scores:
+            continue
+        try:
+            crit.scores[name] = float(val)
+        except ValueError:
+            pass
     for line in reply.splitlines():
         low = line.strip()
         low = re.sub(r"^[–\-•\*]+\s*\*{0,2}", "", low).strip()

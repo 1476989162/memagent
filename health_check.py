@@ -6,7 +6,9 @@ import json, os, sys, subprocess, time, re, glob
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-MEM = ROOT / "agent_memory.json"
+# 2026-08-16 起活动小说为《违约金》（独立库 novel_memory.json）；
+# agent_memory.json 是旧书《错季锁星》的归档库，仍存在时一并展示。
+MEM = ROOT / "novel_memory.json" if (ROOT / "novel_memory.json").exists() else ROOT / "agent_memory.json"
 FT   = ROOT / "foxtable_memory.json"
 
 def load_stats(path, label):
@@ -33,18 +35,21 @@ def load_stats(path, label):
             "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(path.stat().st_mtime))}
 
 def chapter_info():
-    d = ROOT / "works" / "错季锁星" / "chapters"
-    if not d.exists(): return {"exists": False}
-    fs = list(d.glob("第*章.md"))
-    nums = []
-    for f in fs:
-        m = re.search(r"第(\d+)章", f.name)
-        if m: nums.append(int(m.group(1)))
-    if not nums: return {"exists": True, "chapters": 0}
-    return {"exists": True, "chapters": len(nums), "range": f"第{min(nums)}章~第{max(nums)}章",
-            "missing_range": max(nums)-min(nums)+1-len(nums),
-            "newest_mtime": time.strftime("%Y-%m-%d %H:%M",
-                time.localtime(max(f.stat().st_mtime for f in fs)))}
+    for name in ("违约金", "错季锁星"):
+        d = ROOT / "works" / name / "chapters"
+        if not d.exists(): continue
+        fs = list(d.glob("第*章.md"))
+        nums = []
+        for f in fs:
+            m = re.search(r"第(\d+)章", f.name)
+            if m: nums.append(int(m.group(1)))
+        if not nums: return {"exists": True, "work": name, "chapters": 0}
+        return {"exists": True, "work": name, "chapters": len(nums),
+                "range": f"第{min(nums)}章~第{max(nums)}章",
+                "missing_range": max(nums)-min(nums)+1-len(nums),
+                "newest_mtime": time.strftime("%Y-%m-%d %H:%M",
+                    time.localtime(max(f.stat().st_mtime for f in fs)))}
+    return {"exists": False}
 
 def foxtable_info():
     d = ROOT / "works" / "foxtable"
