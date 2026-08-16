@@ -2,8 +2,12 @@
 """读者友好度 post-processor：自动为未内嵌解释的专有术语注入解释短语。
 
 策略：不再依赖 LLM 自觉遵守写作规则——在 LLM 生成文本后，程序化扫描术语
-首次出现位置，若前后 25 字内无解释性标志词，则插入「——解释短语」。
+首次出现位置，若前后 25 字内无【有效解释性标志词】，则插入「——解释短语」。
 每章每个术语最多解释 1 次。
+
+关键修正（v2）：
+- 破折号「——」在中文小说里大量用于叙述断句，不是解释标志
+- 仅当「——」后接定义/描述性词汇（是/叫/为/本/指/意/意/实/意/种/为/原/是/即）时，才视为解释
 """
 import re
 from typing import List, Tuple
@@ -38,53 +42,78 @@ TERM_EXPLANATIONS: dict[str, str] = {
     "影": "——残蜕在沈昭面前呈现的虚像",
 }
 
-EXPLAINERS: List[str] = [
-    "——", "（", "叫", "名为", "是指", "就是", "即", "原本叫", "实为",
-    "本是", "原为", "原来叫", "即是", "意为", "一种", "原本", "意为",
+# 纯解释性标志词（不含「——」这类会被误判的标点）
+STRONG_EXPLAINERS: List[str] = [
+    "（", "叫", "名为", "是指", "就是", "即", "原本叫", "实为",
+    "本是", "原为", "原来叫", "即是", "意为",
 ]
+
+# 破折号「——」只有在后面紧跟定义类词时才视为解释
+DASH_DEFINERS: List[str] = [
+    "是", "叫", "为", "本", "指", "即", "实", "种", "原", "意", "乃",
+]
+
+
+def _is_real_explanation(text: str, pos: int) -> bool:
+    """检查 pos 位置前的 25 字和后 25 字内是否有【有效】解释。"""
+    window_before = text[max(0, pos - 25): pos]
+    window_after = text[pos : pos + 25]
+
+    # 强标志词（括号/叫/名为/是指/就是/即/实为/本是...）
+    for e in STRONG_EXPLAINERS:
+        if e in window_before or e in window_after:
+            return True
+
+    # 破折号「——」：只有后面紧跟定义类词才算
+    for m in re.finditer("——", window_before + "XX" + window_after):
+        # 破折号后 3 字内的内容
+        after_dash = window_after[m.start() + 2: m.start() + 5]
+        if after_dash and any(d in after_dash for d in DASH_DEFINERS):
+            return True
+
+    return False
 
 
 def inject_explanations(text: str) -> Tuple[str, list[str]]:
     """为文本中未内嵌解释的术语注入解释短语。
 
     返回 (processed_text, injected_terms_list)。
-    注：必须从前往后处理（避免插入偏移后续位置）；
-        每章调用时传入该章正文即可获得"每章最多解释 1 次"的语义。
     """
     if not text:
+        return text, []
+
+    # 分离标题与正文
+    first_newline = text.find("\n")
+    if first_newline >= 0 and text.startswith("#"):
+        header, body = text[: first_newline + 1], text[first_newline + 1 :]
+    else:
+        header, body = "", text
+
+    if not body.strip():
         return text, []
 
     injected: list[str] = []
     # 从长到短排序，避免"错季"先被替换影响"错季相"
     terms_sorted = sorted(TERM_EXPLANATIONS.keys(), key=len, reverse=True)
 
-    # 记录插入偏移（每插入一次，后续索引都要往后挪）
-    offset = 0
-
     for term in terms_sorted:
-        # 用 re 在偏移后的文本中查找
         pattern = re.compile(re.escape(term))
-        for m in pattern.finditer(text):
+        expl = TERM_EXPLANATIONS[term]
+        for m in pattern.finditer(body):
             raw_start = m.start()
-            actual_start = raw_start + offset
-            window = text[
-                max(0, actual_start - 25) : actual_start + len(term) + 25
-            ]
-            if any(e in window for e in EXPLAINERS):
-                break  # 已有解释，跳过
-            # 找第一次未解释的出现
-            expl = TERM_EXPLANATIONS[term]
-            insert_pos = actual_start + len(term)
-            # 尝试在下一个标点前插入，保持中文格式自然
-            tail = text[insert_pos : insert_pos + 30]
-            punct_m = re.search(r"([，。、；：！？\）\s\n])", tail)
+            window = body[max(0, raw_start - 25) : raw_start + len(term) + 25]
+            if _is_real_explanation(body, raw_start):
+                break  # 已有有效解释，跳过
+            # 注入
+            insert_pos = raw_start + len(term)
+            tail = body[insert_pos : insert_pos + 30]
+            punct_m = re.search(r"([，。、；：！？\s\n])", tail)
             if punct_m and punct_m.end() < 30:
                 final_pos = insert_pos + punct_m.start()
             else:
                 final_pos = insert_pos
-            text = text[:final_pos] + expl + text[final_pos:]
-            offset += len(expl)
+            body = body[:final_pos] + expl + body[final_pos:]
             injected.append(term)
             break  # 每章每个术语只解释第一次
 
-    return text, injected
+    return header + body, injected

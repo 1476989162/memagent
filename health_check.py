@@ -72,10 +72,22 @@ def pytest_status():
             "passed": int(m.group(1)) if m else None}
 
 def running_procs():
-    p = subprocess.run(["ps","aux"], capture_output=True, text=True)
-    lines = [l for l in p.stdout.splitlines()
-             if re.search(r"autonomous_(writer|coder)\.py|python.*神经网络", l) and "grep" not in l]
-    return [l.split()[0] if l else "" for l in lines]
+    """检测后台 autonomous_writer / autonomous_coder 进程。
+
+    Windows 下 Git Bash 的 `ps aux` 只列出 MSYS 会话内进程，看不到系统级
+    python.exe——曾因此误报"后台已停摆"，实际两个旧写进程（--persona novelist
+    --cycles 0 无限循环）还在持续烧 API 配额写旧书。改用 CIM 按命令行过滤。
+    """
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"name='python.exe'\" | "
+             "ForEach-Object { \"$($_.ProcessId)  $($_.CommandLine)\" }"],
+            capture_output=True, text=True, timeout=20).stdout
+    except Exception:
+        out = ""
+    return [l.strip()[:160] for l in out.splitlines()
+            if re.search(r"autonomous_(writer|coder)\.py", l)]
 
 def main():
     print("═" * 62)
@@ -97,7 +109,7 @@ def main():
     print()
 
     ch = chapter_info()
-    print(f"[小说作品] 错季锁星")
+    print(f"[小说作品] {ch.get('work', '（无）')}")
     print(f"  章节: {ch.get('chapters')} · {ch.get('range')} · 缺口 {ch.get('missing_range')}")
     print(f"  最近更新: {ch.get('newest_mtime')}")
     print()
@@ -108,18 +120,19 @@ def main():
     print()
 
     print(f"[运行中进程]")
-    for l in running_procs():
+    procs = running_procs()
+    for l in procs:
         print(f"  {l}")
-    print("  (无) — 后台已停摆" if not running_procs() else "")
+    print("  (无) — 后台已停摆" if not procs else "")
     print()
 
     print(f"[pytest] 61 个测试文件")
-    print(f"  最近一次: 569 passed")
+    print(f"  最近一次: 581 passed")
     print()
 
     # 问题汇总
     issues = []
-    if not running_procs(): issues.append("🔴 自主后台（writer + coder）未在运行")
+    if not procs: issues.append("🔴 自主后台（writer + coder）未在运行")
     if s.get("importance",{}).get(">1.0",0)>0:
         issues.append(f"🟡 小说记忆 {s['importance']['>1.0']} 条 importance>1.0（编码钳制修复后新写入不会再超，旧条目需下次 sleep 归一化）")
     if ch.get("missing_range",0)>0:
