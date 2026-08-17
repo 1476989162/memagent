@@ -97,6 +97,27 @@ def _prev_chapter_texts(work_dir: Path, before_no: int, k: int = 2) -> list[tupl
     return texts
 
 
+def _load_voice_profile(work_dir: Path) -> str | None:
+    """加载作品目录下的 voice_profile.md（句法/节奏量化约束）。
+
+    voice_profile 是 persona 的**量化补充**——persona 说"对话占比≤40%"，
+    voice_profile 把它拆成可验证的指标（段长分布、极简回应词上限、感官词
+    最低出现密度、禁止段落形态清单）。LLM 在"写小说"任务上默认会退化到
+    "对话剧本+纯对话段堆叠"（《斩契》第8章实测：'对。'出现41次），
+    必须有这份量化约束才能把它拉回来。
+
+    若作品目录没有 voice_profile.md，返回 None（不注入任何句法约束，保留旧行为）。
+    """
+    arch_dir = work_dir / "architecture"
+    for candidate in (work_dir / "voice_profile.md", arch_dir / "voice_profile.md"):
+        if candidate.is_file():
+            try:
+                return candidate.read_text(encoding="utf-8")
+            except Exception:
+                pass
+    return None
+
+
 def one_cycle(agent: MemoryAgent, i: int, *, do_critique: bool = True) -> dict:
     log(f"=== 第 {i} 轮 ===")
 
@@ -144,6 +165,13 @@ def one_cycle(agent: MemoryAgent, i: int, *, do_critique: bool = True) -> dict:
             log(f"节拍表: {len(beats)} 拍")
     except Exception as e:
         log(f"节拍表跳过：{str(e)[:60]}")
+
+    # 句法/节奏 voice profile：量化 persona 未覆盖的段落配比、段长分布、
+    # 感官词/心理词最低密度、禁止段落形态——不注入则 LLM 会退化到纯对话堆叠
+    voice = _load_voice_profile(work_dir)
+    if voice:
+        constraints.append(f"【句法节奏约束（voice profile，违反任何一条即重写）】\n{voice}")
+        log("voice profile: 已加载（基于参考作品量化采样）")
 
     w = agent.write_chapter(constraints=constraints or None)
     if w.get("ok"):
@@ -314,6 +342,54 @@ def one_cycle(agent: MemoryAgent, i: int, *, do_critique: bool = True) -> dict:
                 log("  ✓ 连续性审校通过")
             else:
                 log(f"  ⚠ 连续性仍有 {len(cont['det_issues']) + len(cont['llm_issues'])} 条未清，本章按原样保留")
+        # ③'' 文学审校（确定性）：句法节奏、对话密度、感官/心理/动作密度、
+        # 极简回应词重复。这是连续性审校不会覆盖的另一半——"不错"vs"好看"。
+        # 若命中则强制重写（最多 2 次），把问题条目注入 rewrite constraints。
+        # 与连续性审校**独立运行**，互不影响；即使连续性已 ok，文学审校仍可触发重写。
+        from memagent.literary import literary_checks as _literary_checks
+        try:
+            lit_issues = _literary_checks(chapter_text) if chapter_text else []
+        except Exception as e:
+            lit_issues = []
+            log(f"文学审校异常（跳过）：{str(e)[:60]}")
+        if lit_issues:
+            log(f"文学审校: 命中 {len(lit_issues)} 条，强制重写第{w['chapter']}章")
+            for d in lit_issues:
+                log(f"  ⚠ 文学: {d}")
+            lit_attempts, lit_max = 0, 2
+            while lit_issues and lit_attempts < lit_max:
+                lit_attempts += 1
+                log(f"  文学重写第{w['chapter']}章（第 {lit_attempts}/{lit_max} 次）…")
+                fixes = [f"【文学硬约束-违反即重写】{d}" for d in lit_issues]
+                result = agent.write_chapter(constraints=(constraints or []) + fixes)
+                if not result.get("ok"):
+                    log(f"  文学重写失败：{result.get('reason')}")
+                    break
+                new_text = Path(result["path"]).read_text(encoding="utf-8")
+                try:
+                    lit_issues2 = _literary_checks(new_text)
+                except Exception:
+                    break
+                # 改善即采纳（不要求全部清 0，与连续性重写一致）
+                if len(lit_issues2) < len(lit_issues):
+                    _orig_p, _orig_no = Path(w["path"]), w["chapter"]
+                    _replace_chapter(_orig_p, Path(result["path"]), _orig_no)
+                    w = dict(result); w["path"] = str(_orig_p); w["chapter"] = _orig_no
+                    chapter_text = new_text
+                    lit_issues = lit_issues2
+                    for d in lit_issues:
+                        log(f"    仍存·文学: {d}")
+                else:
+                    try:
+                        Path(result["path"]).unlink()
+                    except Exception:
+                        pass
+                    log("  文学重写未改善，保留原稿")
+                    break
+            if lit_issues:
+                log(f"  ⚠ 文学仍有 {len(lit_issues)} 条未清，本章按原样保留")
+            else:
+                log("  ✓ 文学审校通过")
         # 台账回填：把最终章的事实抽进 facts.json（LLM 不可用/解析失败则跳过）
         try:
             facts = extract_facts(agent.responder, w["title"], w["chapter"], chapter_text)
