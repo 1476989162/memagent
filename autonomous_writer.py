@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import re
 import sys
 import time
 from pathlib import Path
@@ -56,6 +57,46 @@ def log(msg: str) -> None:
         f.write((line + "\n").encode("utf-8"))
 
 
+def _replace_chapter(orig_path: Path, rewrite_path: Path, orig_no: int) -> None:
+    """用重写稿替换原章：重写稿按新章号生成，标题里的「第N章」要改回原章号，
+    否则文件名与正文编号错乱（《斩契》试写第2章实测踩坑：第2章.md 标题写第3章）。"""
+    body = rewrite_path.read_text(encoding="utf-8")
+    body = re.sub(r"(第)\d+(章)", rf"\g<1>{orig_no}\g<2>", body, count=1)
+    orig_path.write_text(body, encoding="utf-8")
+    try:
+        rewrite_path.unlink()
+    except Exception:
+        pass
+
+
+def _ledger_path(work_dir: Path) -> Path:
+    """事实台账路径：作品根目录 facts.json。
+
+    agent._work_dir() 返回的是 works/<书名>/chapters（章节目录），architecture.py
+    的 _arch_dir 专门做了 parent 归一化——台账同样要放作品根目录。第 5/6 章实跑
+    踩坑：漏了归一化 → 台账建在 chapters/facts.json（幽灵文件，首次为空 →
+    canon 词全失效 → 术语守卫把「司契/命契」全报新造，重写约束被垃圾淹没）。
+    """
+    root = work_dir.parent if work_dir.name == "chapters" else work_dir
+    return root / "facts.json"
+
+
+def _prev_chapter_texts(work_dir: Path, before_no: int, k: int = 2) -> list[tuple[int, str]]:
+    """取 before_no 之前的 k 章正文（章间重复检测的参照）。"""
+    texts: list[tuple[int, str]] = []
+    chap_dir = work_dir / "chapters"
+    if not chap_dir.is_dir():
+        return texts
+    for no in range(before_no - 1, max(0, before_no - 1 - k), -1):
+        f = chap_dir / f"第{no}章.md"
+        if f.is_file():
+            try:
+                texts.append((no, f.read_text(encoding="utf-8")))
+            except Exception:
+                pass
+    return texts
+
+
 def one_cycle(agent: MemoryAgent, i: int, *, do_critique: bool = True) -> dict:
     log(f"=== 第 {i} 轮 ===")
 
@@ -82,7 +123,29 @@ def one_cycle(agent: MemoryAgent, i: int, *, do_critique: bool = True) -> dict:
             for s in ev["added"]:
                 log(f"  • {s}")
 
-    w = agent.write_chapter()
+    # ②'' 连续性支撑：事实台账 + 写前节拍表（memagent/continuity.py）。
+    # 台账是结构化"世界状态表"——数字/年龄/生死/谁知道什么的唯一权威来源；
+    # 节拍表把"角色进场时知道什么、从哪知道"的检查前移到动笔之前。
+    from memagent.continuity import FactLedger, beat_sheet
+    ledger = FactLedger(_ledger_path(work_dir))
+    constraints: list[str] = []
+    if ledger.sheet():
+        constraints.append(f"事实台账（数字/年龄/生死/谁知道什么，必须与此一致，"
+                           f"不得矛盾）：\n{ledger.sheet()}")
+    try:
+        from memagent.architecture import next_chapter_goal
+        nxt = agent._next_chapter(new_title)
+        beats = beat_sheet(agent.responder, new_title, nxt,
+                           next_chapter_goal(agent, new_title, nxt, work_dir),
+                           ledger.sheet(), agent._last_chapter_tail(new_title))
+        if beats:
+            constraints.append("本章节拍（括号里已给足信息来源，按此推进）：\n"
+                               + "\n".join(beats))
+            log(f"节拍表: {len(beats)} 拍")
+    except Exception as e:
+        log(f"节拍表跳过：{str(e)[:60]}")
+
+    w = agent.write_chapter(constraints=constraints or None)
     if w.get("ok"):
         title_tag = f" · 「{w['chapter_title']}」" if w.get("chapter_title") else ""
         log(f"写作: 《{w['title']}》第 {w['chapter']} 章{title_tag} · {w['words']} 字 → {w['path']}")
@@ -133,7 +196,7 @@ def one_cycle(agent: MemoryAgent, i: int, *, do_critique: bool = True) -> dict:
                 while reader_score < 6.0 and rewrite_attempts < max_rewrites:
                     rewrite_attempts += 1
                     log(f"  读者友好度 {reader_score:.1f} < 6.0，强制重写第{orig_no}章（第 {rewrite_attempts}/{max_rewrites} 次）…")
-                    result = agent.write_chapter()
+                    result = agent.write_chapter(constraints=constraints or None)
                     if result.get("ok"):
                         rewrite_path = Path(result["path"])
                         chapter_text = rewrite_path.read_text(encoding="utf-8")
@@ -156,14 +219,7 @@ def one_cycle(agent: MemoryAgent, i: int, *, do_critique: bool = True) -> dict:
                             log(f"    沉淀改进 {n} 条")
                             # 达标：用新章内容替换原章，删除多余章
                             if reader_score2 >= 6.0:
-                                import shutil
-                                # 覆盖原章文件
-                                shutil.copy2(rewrite_path, orig_path)
-                                # 删除重写生成的多余章
-                                try:
-                                    rewrite_path.unlink()
-                                except Exception:
-                                    pass
+                                _replace_chapter(orig_path, rewrite_path, orig_no)
                                 # 更新 w 指向原章
                                 w = dict(result); w["path"] = str(orig_path); w["chapter"] = orig_no
                                 reader_score = reader_score2
@@ -178,6 +234,98 @@ def one_cycle(agent: MemoryAgent, i: int, *, do_critique: bool = True) -> dict:
                     log(f"  ⚠ 读者友好度仍未达标 {reader_score:.1f}，本章按原样保留")
         else:
             log("自评: 章节为空，跳过")
+
+    # ③' 连续性审校：确定性检查（死人开口/年龄/数字矛盾）+ 知识状态因果链
+    # （"角色说的每条信息，他从何得知"）——问题条目注入重写，最多 2 次；
+    # 通过后把本章事实抽回台账（世界状态表随章更新）。
+    if w.get("ok"):
+        from memagent.continuity import review_chapter, extract_facts
+        try:
+            chapter_text = Path(w["path"]).read_text(encoding="utf-8")
+        except Exception:
+            chapter_text = ""
+        cont = None
+        if chapter_text:
+            try:
+                cont = review_chapter(agent.responder, ledger, chapter_text,
+                                      w["chapter"], w["title"],
+                                      prev_chapters=_prev_chapter_texts(work_dir, w["chapter"]))
+            except Exception as e:
+                log(f"连续性审校异常（跳过）：{str(e)[:60]}")
+        if cont is not None:
+            for d in cont["det_issues"]:
+                log(f"  ⚠ 连续性·确定: {d}")
+            for it in cont["llm_issues"]:
+                log(f"  ⚠ 连续性·因果: 「{it['quote']}」{it['problem']}")
+            attempts, max_fix = 0, 2
+            while not cont["ok"] and attempts < max_fix:
+                attempts += 1
+                log(f"  连续性问题 {len(cont['det_issues']) + len(cont['llm_issues'])} 条，"
+                    f"重写第{w['chapter']}章（第 {attempts}/{max_fix} 次）…")
+                fixes = [f"修正：{it['quote']} → {it['problem']}"
+                         + (f"（改法：{it['fix']}）" if it["fix"] else "")
+                         for it in cont["llm_issues"]]
+                fixes += [f"修正：{d}" for d in cont["det_issues"]]
+                # 禁用名/污染词守卫的硬提示——重写阶段 LLM 最容易复发（第7/8章实测）
+                banned = [b for b in (ledger.data.get("banned_names") or [])
+                          if isinstance(b, str) and b]
+                if banned:
+                    fixes.append(
+                        f"禁用词铁律：以下词一律不得出现在正文任何位置（含对话、旁白、"
+                        f"心理描写、比喻）：{'/'.join(banned)}。如需指代已逝者的灵契虚像，"
+                        f"统一用「灵契虚像」或角色原称。")
+                # 术语白名单：把台账允许词列明，让 LLM 收敛到词集而非自由造词
+                allowed_terms = ledger.data.get("terms") or []
+                if allowed_terms:
+                    fixes.append(
+                        f"允许使用的命契体系术语（仅可从以下词表中取，禁止自造新的"
+                        f"含「契/境/纹/虫」的核心术语）：{'/'.join(allowed_terms)}")
+                result = agent.write_chapter(constraints=(constraints or []) + fixes)
+                if not result.get("ok"):
+                    log(f"  连续性重写失败：{result.get('reason')}")
+                    break
+                new_text = Path(result["path"]).read_text(encoding="utf-8")
+                try:
+                    cont2 = review_chapter(agent.responder, ledger, new_text,
+                                           result["chapter"], result["title"],
+                                           prev_chapters=_prev_chapter_texts(work_dir, w["chapter"]))
+                except Exception:
+                    break
+                n_old = len(cont["det_issues"]) + len(cont["llm_issues"])
+                n_new = len(cont2["det_issues"]) + len(cont2["llm_issues"])
+                if cont2["ok"] or n_new < n_old:
+                    _orig_p, _orig_no = Path(w["path"]), w["chapter"]
+                    _replace_chapter(_orig_p, Path(result["path"]), _orig_no)
+                    w = dict(result); w["path"] = str(_orig_p); w["chapter"] = _orig_no
+                    chapter_text = new_text
+                    cont = cont2
+                    for d in cont2["det_issues"]:
+                        log(f"    仍存·确定: {d}")
+                    for it in cont2["llm_issues"]:
+                        log(f"    仍存·因果: 「{it['quote']}」{it['problem']}")
+                else:
+                    # 重写没变好：弃新稿保旧稿
+                    try:
+                        Path(result["path"]).unlink()
+                    except Exception:
+                        pass
+                    log("  重写未改善，保留原稿")
+            if cont["ok"]:
+                log("  ✓ 连续性审校通过")
+            else:
+                log(f"  ⚠ 连续性仍有 {len(cont['det_issues']) + len(cont['llm_issues'])} 条未清，本章按原样保留")
+        # 台账回填：把最终章的事实抽进 facts.json（LLM 不可用/解析失败则跳过）
+        try:
+            facts = extract_facts(agent.responder, w["title"], w["chapter"], chapter_text)
+            if facts:
+                ledger.merge_chapter(w["chapter"], facts)
+                ledger.save()
+                log(f"  事实台账: 已回填第{w['chapter']}章"
+                    f"（人物 {len(facts.get('characters') or [])} · 数字 {len(facts.get('numbers') or [])}）")
+            else:
+                log(f"  ⚠ 事实台账: 第{w['chapter']}章抽取未返回有效 JSON（跳过回填，台账不含本章）")
+        except Exception as e:
+            log(f"  事实台账回填失败（跳过）：{str(e)[:60]}")
 
     # 架构文档增量更新：把本章新出场人物 / 新地点 / 新伏笔 追加进架构
     if w.get("ok"):
