@@ -330,6 +330,11 @@ class MemoryStore:
         new.revisions = list(mem.revisions)    # 继承再巩固修订日志（可塑性学习不断层）
         new.revision_count = mem.revision_count
         new.awakenings = list(mem.awakenings)  # 继承唤醒偏差观测（唤醒信号不断层，与修订同语义）
+        # 同一记忆复活：情绪调制（τ 因子与一致性过滤）、技能校验/类型迁移履历
+        # 随唤醒延续——否则一次 Cold↔Warm 往返就丢失这些状态
+        new.emotion = mem.emotion
+        new.checks = list(mem.checks)
+        new.migrations = list(mem.migrations)
         new.awakened_at = now if now is not None else time.time()  # 复活标记
         self._memories[new.id] = new
         return new

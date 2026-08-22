@@ -156,7 +156,9 @@ def fit_report(agent, now: float | None = None) -> dict:
                 continue
             overall["obs"] += 1
             by_type[mem.mtype]["obs"] += 1
-            if la1 > t0 or imp1 != imp0:
+            if la1 > t0 or imp1 != imp0 or n1 != n0:
+                # n1 != n0：睡眠回放只加检索次数不动 last_access，不排除会被
+                # 误判为干净段，频率项跳变把 τ 反推系统性抬高
                 interf += 1
                 by_type[mem.mtype]["interf"] += 1
                 continue
@@ -501,14 +503,19 @@ def _floor_time(
     agent, mtype: MemType, last_access: float, access_count: int,
     importance: float, now: float, tau: float,
 ) -> float | None:
-    """预测该状态从 now 起多久衰减到强度下限 0.2（30τ 内未触底返回 None）。"""
-    if agent.strength_at_state(mtype, last_access, access_count, importance, now) <= STRENGTH_FLOOR + 1e-6:
+    """预测该状态从 now 起多久衰减到强度下限 0.2（30τ 内未触底返回 None）。
+
+    tau 同时决定步长与强度计算（两者必须同源）：调用方传模型信念 τ
+    （裸类型 τ）或实验模式真实 τ。
+    """
+    kw = {"tau_override": tau}
+    if agent.strength_at_state(mtype, last_access, access_count, importance, now, **kw) <= STRENGTH_FLOOR + 1e-6:
         return 0.0
     step = max(1e-6, tau / 10.0)
     t = now
     for _ in range(301):  # 最多推 30τ
         t += step
-        if agent.strength_at_state(mtype, last_access, access_count, importance, t) <= STRENGTH_FLOOR + 1e-6:
+        if agent.strength_at_state(mtype, last_access, access_count, importance, t, **kw) <= STRENGTH_FLOOR + 1e-6:
             return t - now
     return None
 
@@ -527,10 +534,13 @@ def forgetting_slope(agent, mem, now: float | None = None) -> dict:
     - label："持久 N 倍" / "快 N% 触底" / "≈ 典型"。
     """
     now = now if now is not None else time.time()
-    tau = agent._tau_for(mem)
+    # 预测口径统一用裸模型 τ（与 retrieve 打分、fit_report 回放同源）；
+    # 参考线同为该类型的典型记忆——ratio 才反映"这条 vs 同类典型"的差距
+    tau = agent.cfg.tau_for(mem.mtype)
     slope = agent._strength_at(mem, now + tau) - agent._strength_at(mem, now)
     ttf = _floor_time(agent, mem.mtype, mem.last_access, mem.access_count, mem.importance, now, tau)
-    ref_ttf = _floor_time(agent, mem.mtype, now, 0, 0.1, now, tau)
+    # 参考线用裸模型 τ：典型记忆无情绪/兴趣标注，参考值应反映类型本身
+    ref_ttf = _floor_time(agent, mem.mtype, now, 0, 0.1, now, agent.cfg.tau_for(mem.mtype))
     ratio = (ttf / ref_ttf) if (ttf is not None and ref_ttf and ref_ttf > 1e-9) else None
     if ratio is None:
         label = "持久（不触底）" if ttf is None else "≈ 典型"
@@ -564,7 +574,8 @@ def floor_verification(agent, mem, now: float | None = None) -> dict:
     - label：人类可读结论（实测 X vs 预测 Y → 快/慢/贴合）。
     """
     now = now if now is not None else time.time()
-    tau = agent._tau_for(mem)
+    # 预测用裸模型 τ（与观测采样的回落口径一致，见 agent._true_tau_for）
+    tau = agent.cfg.tau_for(mem.mtype)
     floor_row = next((r for r in mem.history if r[1] <= STRENGTH_FLOOR + 1e-9), None)
     if floor_row is None:
         return {

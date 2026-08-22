@@ -24,15 +24,19 @@ def _make_agent():
 
 def _title_mem(agent):
     return next(m for m in agent.store.all()
-                if m.kind == "setting" and "已连载" in m.content)
+                if m.kind == "setting" and "错季锁星" in m.content)
 
 
 def test_title_pushed_out_is_auto_boosted():
-    """书名被多条高重要性伏笔挤出前 8 → 守卫提升后 _work_title 恢复正确。"""
+    """无进度标记的书名被多条高重要性伏笔挤出前 8 → 守卫提升后 _work_title 恢复正确。
+
+    （带“已连载 N 章”进度条的书名记忆在 persona_sheet 中恒排最前，不会被
+    挤出——那是排序口径修复；本测试覆盖的是守卫对普通书名记忆的提升路径。）
+    """
     store, agent = _make_agent()
     # 书名用低 importance，且 kind="setting" 走 remember 时会经情绪调制被略抬，
     # 但远低于伏笔——伏笔用 0.98 大量写入，足以把书名挤到第 8 名之后。
-    agent.remember_setting("《错季锁星》：已连载 55 章", importance=0.3)
+    agent.remember_setting("《错季锁星》是本玄幻小说的作品名", importance=0.3)
     for i in range(20):
         agent.remember_setting(f"伏笔第{i}章某物伏笔正在积累", importance=0.98)
     # 复现 bug：书名被挤出前 8

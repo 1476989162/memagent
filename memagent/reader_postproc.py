@@ -64,12 +64,14 @@ def _is_real_explanation(text: str, pos: int) -> bool:
         if e in window_before or e in window_after:
             return True
 
-    # 破折号「——」：只有后面紧跟定义类词才算
-    for m in re.finditer("——", window_before + "XX" + window_after):
-        # 破折号后 3 字内的内容
-        after_dash = window_after[m.start() + 2: m.start() + 5]
-        if after_dash and any(d in after_dash for d in DASH_DEFINERS):
-            return True
+    # 破折号「——」：只有后面紧跟定义类词才算。
+    # 前/后窗分别检索——原实现把拼接串下标当 window_after 下标用，整体错位。
+    for window in (window_before, window_after):
+        for m in re.finditer("——", window):
+            # 破折号后 3 字内的内容
+            after_dash = window[m.end(): m.end() + 3]
+            if after_dash and any(d in after_dash for d in DASH_DEFINERS):
+                return True
 
     return False
 

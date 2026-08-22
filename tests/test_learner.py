@@ -59,6 +59,43 @@ def test_self_consistent_no_drift():
     assert abs(new - old) / old < 0.15
 
 
+def test_true_tau_fallback_matches_prediction_basis_with_emotion():
+    """观测口径回归：非实验模式下回落 = 裸模型 τ，情绪标注不得带偏采样。
+
+    此前回落到 _tau_for（多乘情绪/兴趣因子），带恐惧标签的记忆采样按
+    τ×10+ 衰减而预测端用裸类型 τ——自洽环境也会产生幻影偏差。"""
+    from memagent.emotion import Emotion
+
+    agent = MemoryAgent(cfg=AgentConfig(tau_by_type={MemType.EPISODIC: 30.0},
+                                        innate_bounds={}))
+    m = agent.remember("我昨天去了趟图书馆", importance=0.1, mtype=MemType.EPISODIC,
+                       emotion=Emotion(valence=-0.8, arousal=0.9,
+                                       self_relevance=0.9, label="恐惧"))
+    assert m.emotion is not None                     # 确认标注在位（否则测试空转）
+    assert agent._true_tau_for(m) == agent.cfg.tau_for(MemType.EPISODIC)
+
+
+def test_clean_segment_tau_est_exact_when_observation_is_model():
+    """自洽环境 + 情绪标注：干净段反推的实测 τ 应精确回到配置值。
+
+    观测与预测同源后，反推不再被情绪因子系统性抬高（此前 neutral ≈×1.10、
+    恐惧 ×10+）。"""
+    from memagent.visualize import fit_report
+
+    clock = {"t": 1000.0}
+    agent = MemoryAgent(
+        cfg=AgentConfig(tau_by_type={MemType.EPISODIC: 30.0}, innate_bounds={}),
+        now_fn=lambda: clock["t"],
+    )
+    m = agent.remember("我昨天去吃了火锅", importance=0.1, mtype=MemType.EPISODIC)
+    agent._observe()
+    clock["t"] += 6.0                                # 一个衰减段（远离触底）
+    agent._observe()
+    seg = fit_report(agent)["by_type"][MemType.EPISODIC.value]
+    assert seg["clean"] >= 1 and seg["tau_est"] is not None
+    assert abs(seg["tau_est"] - 30.0) / 30.0 < 0.05
+
+
 def test_learned_tau_persists_across_restart(tmp_path):
     cfg = AgentConfig(
         tau_by_type={MemType.EPISODIC: 6.0},

@@ -182,12 +182,26 @@ class GrowthEngine:
             seen.add(key)
             similar = [r for r in records if r["antecedent"] == rec["antecedent"] and _jaccard(r["consequent"], rec["consequent"]) >= 0.4]
             if len(similar) >= 2:
+                conf = len(similar) / max(len(records), 1)
+                # 已提炼过的模式只更新 support/confidence，不重复入库
+                # （否则每来一条新记录就再 append 一次，patterns 无界膨胀）
+                existing = next(
+                    (p for p in self.patterns
+                     if p.topic == topic
+                     and p.antecedent == rec["antecedent"]
+                     and _jaccard(p.consequent, rec["consequent"]) >= 0.4),
+                    None,
+                )
+                if existing is not None:
+                    existing.support = len(similar)
+                    existing.confidence = conf
+                    continue
                 self.patterns.append(Pattern(
                     topic=topic,
                     antecedent=rec["antecedent"],
                     consequent=rec["consequent"],
                     support=len(similar),
-                    confidence=len(similar) / max(len(records), 1),
+                    confidence=conf,
                 ))
                 self.growth_history.append({
                     "step": self.growth_step_count,
@@ -195,7 +209,7 @@ class GrowthEngine:
                     "topic": topic,
                     "pattern": f"{rec['antecedent']}→{rec['consequent']}",
                     "support": len(similar),
-                    "confidence": round(len(similar) / max(len(records), 1), 3),
+                    "confidence": round(conf, 3),
                 })
 
     # ---- 概念形成 ----

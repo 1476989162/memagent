@@ -923,20 +923,6 @@ class MemoryAgent:
         self._persist_agent_state()
         self.store.save(path)
 
-    def _tau_for(self, mem: Memory) -> float:
-        """该记忆的遗忘时间常数（按类型 + 情绪调制）。
-
-        τ_effective = τ_by_type(mtype) × τ_factor(emotion)
-
-        恐惧 → τ×31+（几乎不遗忘）；好奇 → τ×0.3（看完即忘）
-        无情绪标注 → τ_factor=1.0，行为与旧版完全一致。
-        """
-        base_tau = self.cfg.tau_for(mem.mtype)
-        if mem.emotion is None:
-            return base_tau
-        # mem.emotion 是 Emotion 实例（object 类型绕过循环导入）
-        return base_tau * tau_factor(mem.emotion)
-
     def _cold_after(self, mem: Memory) -> float:
         """该记忆压缩进 Cold 的闲置阈值：绝对秒数或按类型 τ 推导。"""
         if self.cfg.cold_after_seconds is not None:
@@ -944,11 +930,20 @@ class MemoryAgent:
         return self.cfg.cold_after_tau * self._tau_for(mem)
 
     def _true_tau_for(self, mem: Memory) -> float:
-        """观测用的"真实"遗忘 τ：配置了 true_tau_by_type 时用它，否则同模型 τ。"""
+        """观测用的"真实"遗忘 τ：配置了 true_tau_by_type 时用它（实验模式模拟
+        隐藏环境的真实遗忘），否则回落到**模型预测同一口径**（裸类型 τ）。
+
+        回落不能带情绪/兴趣调制（_tau_for）：非实验模式下采样公式本身就是
+        "环境"，观测端若比预测端多乘一个因子（neutral 也 ≈×1.10），fit_report
+        与唤醒偏差比值都会看到幻影偏差，learn_tau / learn_plasticity 被系统性
+        带偏——三处消费方（_record_sample / _observe_awakening / 触底验证）
+        的契约都是"未配置时同模型 τ"。
+        """
         m = self.cfg.true_tau_by_type
+        model_tau = self.cfg.tau_for(mem.mtype)
         if not m:
-            return self._tau_for(mem)
-        return m.get(mem.mtype, self._tau_for(mem))
+            return model_tau
+        return m.get(mem.mtype, model_tau)
 
     def set_growth_direction(self, topic: str, intensity: float = 0.8, keywords: list[str] | None = None) -> None:
         """显式指定成长方向。
@@ -981,6 +976,7 @@ class MemoryAgent:
         """
         if kind == "turn" and importance is None:
             importance = 0.05
+        explicit_emotion = emotion is not _UNSET  # 显式传参才允许覆盖旧记忆的情绪标注
         if emotion is _UNSET:
             emotion = infer_emotion(content)
         if emotion is not None:
@@ -1007,14 +1003,18 @@ class MemoryAgent:
         mtype_conf: float | None = None
         if mtype is None:
             mtype, mtype_conf, _ = self.classifier.classify(content, kind)
+        cv = embed_text(content)  # 查询向量只算一次（循环内重复嵌入是 O(N) 写入开销）
         cand = [m for m in self.store.all() if m.tier is not Tier.COLD]
         for m in cand:
-            if cosine_similarity(embed_text(content), embed_text(m.content)) >= DEDUP_THRESHOLD:
+            if cosine_similarity(cv, embed_text(m.content)) >= DEDUP_THRESHOLD:
                 m.touch(self._now())
                 self._record_sample(m)
                 if importance > m.importance:
                     m.importance = importance
-                m.emotion = emotion
+                if explicit_emotion:
+                    m.emotion = emotion
+                elif m.emotion is None:
+                    m.emotion = emotion  # 自动推断只补空，不抹掉已有标注（如恐惧）
                 return m
         mem = self.store.add(
             content, importance=importance, kind=kind,
@@ -1057,7 +1057,10 @@ class MemoryAgent:
         settings = [m for m in self.store.all() if m.kind == "setting"]
         if not settings:
             return None
-        settings.sort(key=lambda m: m.importance, reverse=True)
+        # “已连载 N 章”进度条是作品名唯一权威载体，排最前（与写章守卫同口径）：
+        # 长期运行后多条设定可能都饱和在 importance=1.0，纯重要性排序会因并列
+        # 不稳定而把进度条挤出前 limit，导致 _work_title() 误判书名。
+        settings.sort(key=lambda m: ("已连载" not in m.content, -m.importance))
         lines = [f"• {m.content}" for m in settings[:limit]]
         return "\n".join(lines)
 
@@ -1194,6 +1197,7 @@ class MemoryAgent:
         for m in self.store.all():
             if m.kind == "setting" and "已连载" in m.content and title in m.content:
                 m.content = tag
+                m.embedding = embed_text(tag)  # 内容变了必须同步检索向量
                 return
         self.remember_setting(tag, importance=0.95)
 
@@ -1274,11 +1278,13 @@ class MemoryAgent:
         cands.sort(key=lambda x: ("已连载" not in x[0].content, -x[0].importance))
         mem, title = cands[0]
 
-        top = sorted(settings, key=lambda m: m.importance, reverse=True)[:8]
+        # 与 persona_sheet 同口径：进度条优先，其次重要性（并列时排序才稳定）
+        top = sorted(settings, key=lambda m: ("已连载" not in m.content, -m.importance))[:8]
         if mem in top:
             return title
         eighth = min(m.importance for m in top)
-        new_imp = max(eighth + 0.2, mem.importance * 1.5, 1.0)
+        # 钳制到 [0,1]：importance >1 会扭曲强度比例，且 ≥freeze_importance 后记忆永久冻结
+        new_imp = min(1.0, max(eighth + 0.2, mem.importance * 1.5))
         print(
             f"[写章守卫] 作品名《{title}》被挤出人设档案前 8（importance "
             f"{mem.importance:.3f} → {new_imp:.3f}），已自动提升",
@@ -1683,10 +1689,12 @@ class MemoryAgent:
                 return True
             return False
 
-        if now > mem.labile_until:
+        # 先判断是否本就在既有窗口内，再开新窗口——否则判断恒真，窗口机制失效
+        in_window = now <= mem.labile_until
+        if not in_window:
             mem.labile_until = now + self.cfg.reconsolidation_window
         lability = 1.0 - mem.importance
-        boost = 1.0 + (self.cfg.labile_bonus if now <= mem.labile_until else 0.0)
+        boost = 1.0 + (self.cfg.labile_bonus if in_window else 0.0)
         changed = False
 
         # 1) 语义微调：向量向回忆情境漂移（幅度按类型因子缩放：技能稳、情景易改写）
@@ -1859,8 +1867,11 @@ class MemoryAgent:
                 self._record_sample(mem)    # 观测采样 → 曲线 / 语义化评分可见
                 report["replayed"].append(mem.content[:20])
             for mem in unreplayed:
+                if mem.importance >= self.cfg.freeze_importance:
+                    continue  # 核心记忆豁免：连乘模糊系数会击穿冻结保护（0.9² 即跌破 0.8）
                 old_imp = mem.importance
-                mem.importance = max(0.0, old_imp * self.cfg.replay_fog_factor)
+                mem.importance = max(self.cfg.importance_floor,
+                                     old_imp * self.cfg.replay_fog_factor)
                 report["fogged"].append({"content": mem.content[:20],
                                           "importance": round(old_imp, 4),
                                           "fogged": round(mem.importance, 4)})
@@ -2838,7 +2849,12 @@ class MemoryAgent:
                 if len(parts) == 2:
                     from .websearch import search_web
 
-                    results = search_web(parts[1], n=5)
+                    try:
+                        results = search_web(parts[1], n=5)
+                    except Exception as e:
+                        # 网络异常不冲出 REPL（否则未 save 直接退出）
+                        print(f"（联网搜索失败：{str(e)[:80]}）")
+                        continue
                     if not results:
                         print("（联网搜索无结果或不可用）")
                     for r in results[:5]:

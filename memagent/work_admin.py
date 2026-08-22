@@ -324,7 +324,7 @@ def promote_repair(
         if not revision.exists():
             shutil.copy2(target, revision)
         atomic_write_text(target, text, backup=True)
-        audit = audit_work(root, minimum_characters=900)
+        audit = audit_work(root, minimum_characters=minimum_characters)
         atomic_write_json(root / "chapter_manifest.json", audit, backup=True)
     return {
         "chapter": number,

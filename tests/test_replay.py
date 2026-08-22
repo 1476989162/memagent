@@ -70,6 +70,26 @@ def test_interrupted_sleep_budget_zero_fogs_all():
     assert all(m.access_count == 0 for m in ms)   # 未重放 → 无再激活
 
 
+def test_fog_spares_core_memories():
+    """核心记忆（importance ≥ freeze_importance）豁免睡眠模糊。
+
+    连乘 0.9 两轮就会跌破 0.8 冻结线——不豁免的话，核心记忆两次中断睡眠
+    就失去冻结保护并进入冷压缩候选池。"""
+    clock = [1000.0]
+    a = _mk(clock)
+    core = a.store.add("我的名字是小林", importance=0.95)
+    low = a.store.add("晚期经历", importance=0.3)
+    core.last_access = clock[0]
+    clock[0] += 1
+    low.last_access = clock[0]
+    clock[0] += 1
+    r = a.sleep(duration=0.5)                     # 预算 0 → 全部未回放
+    assert r["unreplayed_count"] == 2
+    assert core.importance == 0.95                # 豁免：核心记忆不动
+    assert low.importance == 0.27                 # 正常模糊：0.3 × 0.9
+    assert all(f["content"] != "我的名字是小林" for f in r["fogged"])
+
+
 def test_replay_does_not_touch_last_access():
     """重放不改 last_access：否则每次睡眠都重置衰减时钟，记忆变得不朽。"""
     clock = [1000.0]

@@ -108,7 +108,8 @@ class CuriosityDrivenExplore:
         if not self.agent:
             return {"error": "未绑定 agent"}
         topics = self.agent.interest.detect_topics(question + " " + answer)
-        self.agent.reremember(f"[用户解答] {question} → {answer}", kind="fact", importance=0.9)
+        # remember 自带相似度去重：同一问题多次解答会合并而非堆积重复记忆
+        self.agent.remember(f"[用户解答] {question} → {answer}", kind="fact", importance=0.9)
         for t in topics:
             self.agent.interest.set(t, self.agent.interest.get(t) + 0.05)
         self.unanswered = [q for q in self.unanswered if q != question]

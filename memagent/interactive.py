@@ -1493,7 +1493,11 @@ function applyWindow() {
 document.getElementById('twApply').addEventListener('click', applyWindow);
 document.querySelectorAll('.tw-preset').forEach(function (b) {
   b.addEventListener('click', function () {
-    renderTypeChart(MEM.now + parseFloat(b.dataset.w0) * 86400, MEM.now + parseFloat(b.dataset.w1) * 86400);
+    // 预设写回输入框再走 applyWindow——否则 select() 重绘时 currentWindow()
+    // 读到空输入框，视图立即弹回默认全程，预设选择丢失
+    document.getElementById('twPast').value = String(Math.abs(parseFloat(b.dataset.w0)));
+    document.getElementById('twFuture').value = String(Math.abs(parseFloat(b.dataset.w1)));
+    applyWindow();
   });
 });
 document.getElementById('twReset').addEventListener('click', function () {

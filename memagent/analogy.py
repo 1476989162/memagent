@@ -83,7 +83,9 @@ class AnalogyTransfer:
             if tgt != target_domain:
                 continue
             for rule in rules:
-                if self._jaccard(set(rule["target_pattern"].split()), set(query.split())) > 0.2:
+                # register_analogy 的规则只有 target_mapping，auto_learn 的才有 target_pattern
+                match_text = rule.get("target_pattern") or rule.get("target_mapping", "")
+                if self._jaccard(set(match_text.split()), set(query.split())) > 0.2:
                     suggestions.append({
                         "source_domain": src,
                         "analogy": f"'{rule.get('source_pattern','')}' → '{rule.get('target_mapping', rule.get('target_pattern',''))}'",
