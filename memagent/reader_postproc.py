@@ -5,42 +5,18 @@
 首次出现位置，若前后 25 字内无【有效解释性标志词】，则插入「——解释短语」。
 每章每个术语最多解释 1 次。
 
+出厂婴儿原则（v3）：**包内零词表**。术语解释是作品的人格数据，
+从作品目录的 `term_explanations.json` 加载（{"术语": "——解释"}），
+没有配置文件 = 功能静默关闭。机制随产品发布，词表随作品走。
+
 关键修正（v2）：
 - 破折号「——」在中文小说里大量用于叙述断句，不是解释标志
-- 仅当「——」后接定义/描述性词汇（是/叫/为/本/指/意/意/实/意/种/为/原/是/即）时，才视为解释
+- 仅当「——」后接定义/描述性词汇（是/叫/为/本/指/即）时，才视为解释
 """
+import json
 import re
-from typing import List, Tuple
-
-TERM_EXPLANATIONS: dict[str, str] = {
-    "塔纹": "——他掌心自幼就有的九道银色裂痕",
-    "淬生气": "——从他骨髓里抽出来的暖流灵气",
-    "锈脉": "——蚀灭极霜气在他血脉里凿出的暗管",
-    "错季": "——每隔一段日子就出现的时间错位现象",
-    "骨契": "——以骨为契、以血为印的古老契约",
-    "残蜕": "——从沈昭灵魂中蜕出的旧壳，他的另一半自我",
-    "造血深渊": "——沧澜旧都地宫最深处孕育诡异生灵的暗渊",
-    "当票": "——浮屠商会典当之时开给当主的凭证",
-    "脊骨": "——沈昭在断魂崖试炼地获得的远古遗骨",
-    "骨片": "——记载契约条款的薄如蝉翼的骨制刻片",
-    "当主": "——在浮屠商会典当物品的人",
-    "命格": "——决定一个人命运走向的先天印记",
-    "错季相": "——同时掌控淬生与蚀灭两种灵气相位的至高境界",
-    "锁扣": "——浮屠商会暗柜上用于封印契约的铁制机关",
-    "错季裂隙": "——错季发生时空间与时间之间的裂缝",
-    "未时": "——错季纪年中对应下午一点至三点的时辰",
-    "未月": "——错季纪年中月亮位置特殊的月份",
-    "九川": "——传说中被灵气两极排序统治的九州疆土",
-    "折丹": "——逆转金丹修为、以退为进的禁忌修炼法",
-    "封镇": "——用灵气和契约封印妖神的古老阵法",
-    "骨画": "——骨片上以朱砂绘制的契约图案",
-    "水漏": "——残蜕逼近时从脊骨残片中传来的九声骨落之声",
-    "残响": "——残蜕读取沈昭情绪峰值时留下的共鸣残响",
-    "霜意": "——蚀灭极灵气的外在表现，冰冷刺骨",
-    "空壳": "——霜意填满后失去自我、只剩躯体的存在",
-    "三魂": "——人的灵魂三态：魂、魄、识",
-    "影": "——残蜕在沈昭面前呈现的虚像",
-}
+from pathlib import Path
+from typing import List, Tuple, Union
 
 # 纯解释性标志词（不含「——」这类会被误判的标点）
 STRONG_EXPLAINERS: List[str] = [
@@ -76,12 +52,32 @@ def _is_real_explanation(text: str, pos: int) -> bool:
     return False
 
 
-def inject_explanations(text: str) -> Tuple[str, list[str]]:
+def load_terms_for_work(chapter_dir: Union[str, Path]) -> dict:
+    """从作品目录加载术语表（出厂婴儿：包内零词表，作品自配）。
+
+    查找顺序：<chapter_dir>/term_explanations.json → 其父目录。
+    找不到或文件损坏返回 {}（功能静默关闭）。JSON 形态：{"术语": "——解释"}。
+    """
+    p = Path(chapter_dir)
+    for cand in (p / "term_explanations.json", p.parent / "term_explanations.json"):
+        try:
+            if not cand.is_file():
+                continue
+            data = json.loads(cand.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items() if str(v).strip()}
+    return {}
+
+
+def inject_explanations(text: str, terms: dict) -> Tuple[str, list[str]]:
     """为文本中未内嵌解释的术语注入解释短语。
 
-    返回 (processed_text, injected_terms_list)。
+    terms: {"术语": "——解释短语"}（从作品目录加载，见 load_terms_for_work）。
+    返回 (processed_text, injected_terms_list)。terms 为空时原文返回。
     """
-    if not text:
+    if not text or not terms:
         return text, []
 
     # 分离标题与正文
@@ -95,14 +91,20 @@ def inject_explanations(text: str) -> Tuple[str, list[str]]:
         return text, []
 
     injected: list[str] = []
-    # 从长到短排序，避免"错季"先被替换影响"错季相"
-    terms_sorted = sorted(TERM_EXPLANATIONS.keys(), key=len, reverse=True)
+    # 从长到短排序，避免短术语先被替换影响长术语（如"错季"影响"错季相"）
+    terms_sorted = sorted(terms.keys(), key=len, reverse=True)
 
     for term in terms_sorted:
         pattern = re.compile(re.escape(term))
-        expl = TERM_EXPLANATIONS[term]
+        expl = terms[term]
+        # 该术语是某些更长术语的前缀子串时，命中位置若正是长术语的起始，
+        # 必须跳过——否则短术语会吃进长术语的字内部位造成二次注入
+        super_terms = [t for t in terms_sorted
+                       if len(t) > len(term) and term in t]
         for m in pattern.finditer(body):
             raw_start = m.start()
+            if any(body.startswith(t, raw_start) for t in super_terms):
+                continue
             window = body[max(0, raw_start - 25) : raw_start + len(term) + 25]
             if _is_real_explanation(body, raw_start):
                 break  # 已有有效解释，跳过

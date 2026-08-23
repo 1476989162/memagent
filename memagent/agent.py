@@ -1447,13 +1447,17 @@ class MemoryAgent:
             pass
 
         d = save_dir or self._work_dir(title)
-        # 读者友好度 post-process：为未内嵌解释的术语注入解释短语
+        # 读者友好度 post-process：术语表从作品目录 term_explanations.json 加载
+        # （出厂婴儿原则——包内零词表；作品未配置 = 功能静默关闭）
         try:
             from .reader_postproc import inject_explanations as _ri
+            from .reader_postproc import load_terms_for_work as _load_terms
+
+            _terms = _load_terms(d)
+            if _terms:
+                text, _inj = _ri(text, _terms)
         except Exception:
-            _ri = None
-        if _ri:
-            text, _inj = _ri(text)
+            pass  # 词表缺失/损坏不阻断写章主流程
         f = Path(d) / f"第{chapter}章.md"
         header = f"# 《{title}》第{chapter}章"
         if chap_title:

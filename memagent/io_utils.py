@@ -80,6 +80,23 @@ class FileLock:
         self.release()
 
 
+def _replace_with_retry(temp: Path, target: Path, attempts: int = 3) -> None:
+    """os.replace 的 Windows 瞬时占用重试。
+
+    目标文件被其他进程短暂打开（autonomous_coder 同写、杀毒扫描）时，
+    replace 会抛 PermissionError（WinError 5）。这类占用毫秒级即释放，
+    小退避重试即可；持续占用则最后一次照常抛出。
+    """
+    for attempt in range(attempts):
+        try:
+            os.replace(temp, target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 def atomic_write_text(
     path: str | Path,
     text: str,
@@ -106,10 +123,10 @@ def atomic_write_text(
             backup_path = target.with_suffix(target.suffix + ".bak")
             backup_temp = backup_path.with_suffix(backup_path.suffix + ".tmp")
             shutil.copy2(target, backup_temp)
-            os.replace(backup_temp, backup_path)
+            _replace_with_retry(backup_temp, backup_path)
 
         if overwrite:
-            os.replace(temp, target)
+            _replace_with_retry(temp, target)
         else:
             try:
                 os.link(temp, target)
@@ -146,7 +163,7 @@ def atomic_write_bytes(
             handle.flush()
             os.fsync(handle.fileno())
         if overwrite:
-            os.replace(temp, target)
+            _replace_with_retry(temp, target)
         else:
             try:
                 os.link(temp, target)
