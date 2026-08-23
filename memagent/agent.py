@@ -46,6 +46,16 @@ QUERY_BOOST_HOT = 1.25   # Hot 记忆（工作记忆）的检索加成
 TURN_PENALTY = 0.5       # 对话流水记忆的检索惩罚（事实记忆权重更高）
 STRENGTH_FLOOR = 0.2     # 检索强度下限，避免相似度被完全吞掉
 DEDUP_THRESHOLD = 0.92   # 与已有记忆几乎相同 → 合并（去重）
+# 「真正相关」判据（total 下限）：符号哈希嵌入（v0.3.1）消除了无关文本的
+# 正向碰撞偏置（无关 ≈ 0.0），真匹配的 total 分布整体下移——阈值从 0.05
+# 校准到 0.03，保持「弱但真实的相关」能触发测试效应/注入，噪声依然进不来。
+RELEVANT_TOTAL = 0.03
+# 词汇重叠保底（符号哈希的病态兜底）：短查询+短记忆恰共享一个 n-gram 时，
+# 伪碰撞可能反向精确抵消真信号（余弦塌陷到 0）。仅当余弦低到近零
+# （< REL_CANCEL_TRIGGER，噪声水平）且嵌入源里确有共享 gram → 按固定分
+# 计。真实弱匹配（0.05~0.1）与 Cold 摘要不可及（content-only 词）不受影响。
+REL_CANCEL_TRIGGER = 0.03
+REL_CANCEL_FLOOR = 0.20
 
 
 def _safe_title(title: str) -> str:
@@ -1781,12 +1791,13 @@ class MemoryAgent:
             parts.append("（没有找到相关的旧记忆）我还不太了解这个，你能多说一点吗？")
         else:
             parts.append("我记得：")
+            from .instructions import clip_content  # 函数级导入避免循环
             for h in relevant[:2]:
                 m = h.memory
                 if h.via_summary:
                     parts.append(f"  • [索引:{m.id[:6]}] {m.summary}（这是压缩摘要，可用 /recall {m.id[:6]} 唤醒细节）")
                 else:
-                    parts.append(f"  • {m.content}")
+                    parts.append(f"  • {clip_content(m.content, m.id)}")
             parts.append("这和你说的有关吗？")
         return "\n".join(parts)
 
@@ -1796,10 +1807,14 @@ class MemoryAgent:
         未配置 / 未设 key / 网络或解析出错 → 自动回退模板回复。"""
         if self.responder is not None and self.responder.available:
             try:
+                from .instructions import clip_content  # 函数级导入避免循环
                 mems = [
                     # 与模板路径一致：Cold 命中（via_summary）注入摘要文本
-                    # 而非深藏 content——命中词在摘要里，content 可能不含
-                    (h.memory.summary or h.memory.content, h.memory.mtype.value, h.strength)
+                    # 而非深藏 content——命中词在摘要里，content 可能不含。
+                    # 展示边界截断：全文在库里，超限给前 N 字 + 唤醒指针
+                    (clip_content(h.memory.summary or h.memory.content,
+                                  h.memory.id),
+                     h.memory.mtype.value, h.strength)
                     for h in relevant[:3]
                 ]
                 if scene is not None:
