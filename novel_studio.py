@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import threading
 import time
@@ -27,12 +28,74 @@ HOME = ROOT / "novel_studio"
 CFG_PATH = HOME / "studio_config.json"
 
 DEFAULT_CFG = {
-    "draft_model": "",      # 正文：性价比模型
-    "extract_model": "",    # 精读提炼：最强模型
-    "judge_model": "",      # 审校评委
+    "providers": [],        # [{name, base_url, api_key}]
+    "models": [],           # [{id, provider, model}]
+    "roles": {"draft": "", "extract": "", "judge": ""},   # -> models[].id
     "active_work": "",
+    # 兼容旧字段：draft_model 等纯名字字符串，迁移后仅作回退显示
+    "draft_model": "",
+    "extract_model": "",
+    "judge_model": "",
 }
 CFG = dict(DEFAULT_CFG)
+
+
+def _preset_conns() -> dict:
+    """常用端点预设（名称 -> base_url）。"""
+    return {
+        "OpenAI 官方": "https://api.openai.com/v1",
+        "DeepSeek 官方": "https://api.deepseek.com/v1",
+        "智谱 GLM": "https://open.bigmodel.cn/api/paas/v4",
+        "SiliconFlow": "https://api.siliconflow.cn/v1",
+        "本地 Ollama": "http://localhost:11434/v1",
+        "本地 vLLM/LMStudio": "http://localhost:8000/v1",
+    }
+
+
+def _migrate_cfg() -> None:
+    """旧配置迁移：只有 draft_model 字符串时，用 .env 的 OPENAI_* 建
+    「.env 默认」供应商并生成对应模型项；roles 留空待用户在界面指派。"""
+    if CFG.get("providers"):
+        return
+    base = (os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
+    if not base:
+        try:
+            import memagent.llm as _llm  # 触发 _load_dotenv 副作用
+            base = (os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
+        except Exception:
+            pass
+    key = os.environ.get("OPENAI_API_KEY") or ""
+    if not base:
+        return
+    CFG["providers"] = [{"name": ".env 默认", "base_url": base,
+                         "api_key": key}]
+    m = CFG.get("draft_model") or os.environ.get("OPENAI_MODEL") or ""
+    if m:
+        CFG["models"] = [{"id": f".env默认/{m}", "provider": ".env 默认",
+                          "model": m}]
+
+
+def _resolve_role(role: str) -> dict:
+    """角色 -> 连接三元组 {base_url, api_key, model}；未配置返回 {}。"""
+    mid = (CFG.get("roles") or {}).get(role) or ""
+    for mm in CFG.get("models") or []:
+        if mm.get("id") == mid:
+            prov = next((pv for pv in CFG.get("providers") or []
+                         if pv.get("name") == mm.get("provider")), None)
+            if prov:
+                return {"base_url": prov["base_url"],
+                        "api_key": prov.get("api_key", ""),
+                        "model": mm["model"]}
+    # 兼容回退：旧 draft_model 字符串 + .env 端点
+    if role == "draft" and CFG.get("draft_model"):
+        try:
+            import memagent.llm as _llm
+        except Exception:
+            pass
+        return {"base_url": (os.environ.get("OPENAI_BASE_URL") or "").rstrip("/"),
+                "api_key": os.environ.get("OPENAI_API_KEY", ""),
+                "model": CFG["draft_model"]}
+    return {}
 ACTIVE: dict[str, str] = {"path": ""}
 JOB: dict = {"running": False, "type": "", "status": "idle",
              "log": [], "result": None}
@@ -94,8 +157,11 @@ def _active_agent():
     p = ACTIVE.get("path")
     if not p:
         raise RuntimeError("未选择作品")
-    draft = CFG.get("draft_model") or None
-    responder = LLMResponder(model=draft, timeout=300.0) if draft else None
+    conn = _resolve_role("draft")
+    responder = (LLMResponder(base_url=conn["base_url"],
+                              api_key=conn["api_key"], model=conn["model"],
+                              timeout=300.0)
+                 if conn else None)
     # 写入分类走离线关键词：避免每条 remember 都打一次 LLM（单条 6s×批量）
     return MemoryAgent(
         persist_path=ACTIVE.get("store") or str(Path(p) / "memory.json"),
@@ -140,8 +206,8 @@ _REASON_HINT = {
 }
 
 def _task_generate(words: int) -> dict:
-    if not (CFG.get("draft_model") or "").strip():
-        raise RuntimeError("未配置正文模型：请到 ⚙ 设置·模型 填写后重试")
+    if not _resolve_role("draft"):
+        raise RuntimeError("draft model not configured")
     _job_log("初始化写作 agent…")
     agent = _active_agent()
     title = Path(ACTIVE["path"]).name
@@ -180,10 +246,12 @@ def _task_deepread(txt_path: str, label: str, max_chunks: int) -> dict:
     from memagent.responder import LLMResponder
 
     agent = _active_agent()   # 技法注入到当前打开的作品
-    model = CFG.get("extract_model") or CFG.get("draft_model")
-    if not model:
-        raise RuntimeError("请先在设置里配置精读模型")
-    rsp = LLMResponder(model=model, timeout=240.0)
+    conn = _resolve_role("extract") or _resolve_role("draft")
+    if not conn:
+        raise RuntimeError("extract role not configured")
+    rsp = LLMResponder(base_url=conn["base_url"],
+                       api_key=conn["api_key"],
+                       model=conn["model"], timeout=240.0)
     raw = Path(txt_path).read_bytes()
     text = None
     for enc in ("utf-8", "gb18030", "gbk"):
@@ -270,6 +338,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if route == "/api/state":
+                _migrate_cfg()
                 works = _works()
                 ext = ACTIVE.get("path", "")
                 if ext:
@@ -380,9 +449,14 @@ class Handler(BaseHTTPRequestHandler):
                                    "store": str(store),
                                    "wdir": ACTIVE["wdir"]})
             if self.path == "/api/config":
+                if b.get("full"):
+                    for k in ("providers", "models", "roles"):
+                        if k in b:
+                            CFG[k] = b[k]
                 for k in ("draft_model", "extract_model", "judge_model"):
                     if k in b:
                         CFG[k] = str(b[k]).strip()
+                _migrate_cfg()
                 _cfg_save()
                 return self._json({"ok": True, "cfg": CFG})
             if self.path == "/api/generate":
@@ -437,6 +511,13 @@ PAGE = r"""<!DOCTYPE html>
    overflow-y:auto;color:var(--ok)}
  h2{font-size:15px;border-left:3px solid var(--acc);padding-left:8px}
  .row{display:flex;gap:14px}.row>div{flex:1}
+ .card{background:var(--panel);border:1px solid var(--line);
+   border-radius:8px;padding:14px;margin-bottom:14px}
+ .card h3{font-size:13px;color:var(--acc);margin:0 0 10px}
+ .pill{padding:6px 10px;border:1px solid var(--line);border-radius:6px;
+   margin-bottom:6px;font-size:13px}
+ select{background:#101218;border:1px solid var(--line);color:var(--fg);
+   border-radius:6px;padding:8px;width:100%;font-size:13px}
  #chapview{white-space:pre-wrap;line-height:1.9;font-size:14px;background:
    var(--panel);padding:20px;border-radius:8px;margin-top:12px}
 </style></head><body>
@@ -502,18 +583,80 @@ async function createW(){const b={};["name","premise","pro","ant","world","style
  b.protagonist=$("n_pro").value;b.antagonist=$("n_ant").value;
  b.worldview=$("n_world").value;b.style=$("n_style").value;
  const r=await api("/api/work/new",b);r.ok?(refresh(),drawWrite()):alert(r.error)}
+const PRESETS = {"OpenAI 官方":"https://api.openai.com/v1",
+ "DeepSeek 官方":"https://api.deepseek.com/v1","智谱 GLM":"https://open.bigmodel.cn/api/paas/v4",
+ "SiliconFlow":"https://api.siliconflow.cn/v1","本地 Ollama":"http://localhost:11434/v1",
+ "本地 vLLM/LMStudio":"http://localhost:8000/v1"};
+let CFGFULL = {providers:[],models:[],roles:{draft:"",extract:"",judge:""}};
 async function drawCfg(){
- const c=(await api("/api/state")).cfg;
- $("main").innerHTML=`<h2>设置 · 模型分工</h2>
- <label>正文初稿（性价比模型，如 deepseek-v4-flash）</label>
- <input id="c_draft" value="${c.draft_model||''}">
- <label>精读提炼（最强模型，如 glm-5.2）</label>
- <input id="c_ext" value="${c.extract_model||''}">
- <label>审校评委（建议第三方）</label>
- <input id="c_judge" value="${c.judge_model||''}">
- <p><button onclick="saveCfg()">💾 保存</button>
- <span style="color:var(--dim);font-size:12px">　模型名需与你的 API 代理一致；留空则正文无 LLM、精读回退正文模型</span></p>`;}
-async function saveCfg(){await api("/api/config",{draft_model:$("c_draft").value,
+ const st = await api("/api/state");
+ CFGFULL = {providers:st.cfg.providers||[], models:st.cfg.models||[],
+            roles:st.cfg.roles||{draft:"",extract:"",judge:""}};
+ $("main").innerHTML = `<h2>设置 · 连接与模型</h2>
+  <div class="card"><h3>① 连接（供应商）</h3><div id="provList"></div>
+   <div class="row" style="margin-top:8px">
+    <div><label>名称</label><input id="p_name" placeholder="如 本地Qwen"></div>
+    <div><label>Base URL</label><input id="p_url" placeholder="http://localhost:11434/v1"></div>
+    <div><label>API Key（可空）</label><input id="p_key" placeholder="sk-..."></div>
+   </div>
+   <label>从预设快速填充 ↓</label>
+   <select id="p_preset" onchange="if(this.value){$('p_url').value=this.value;if(!$('p_name').value)$('p_name').value=this.selectedOptions[0].text}">
+    <option value="">— 选择预设 —</option>
+    ${Object.entries(PRESETS).map(([k,v])=>`<option value="${v}">${k}</option>`).join("")}
+   </select>
+   <p><button onclick="addProv()">＋ 添加连接</button></p></div>
+  <div class="card"><h3>② 模型（挂在某个连接下）</h3><div id="modelList"></div>
+   <div class="row" style="margin-top:8px">
+    <div><label>连接</label><select id="m_prov"></select></div>
+    <div><label>Model 名</label><input id="m_name" placeholder="qwen2.5:14b"></div>
+   </div>
+   <p><button onclick="addModel()">＋ 添加模型</button></p></div>
+  <div class="card"><h3>③ 角色分配</h3>
+   <label>正文初稿（性价比）</label><select id="r_draft"></select>
+   <label>精读提炼（最强）</label><select id="r_ext"></select>
+   <label>审校评委</label><select id="r_judge"></select>
+   <p><button onclick="saveCfg()">💾 保存全部</button>
+   <span style="color:var(--dim);font-size:12px">　Key 仅存本机 studio_config.json</span></p></div>`;
+ renderCfg();}
+function renderCfg(){
+ const P=CFGFULL.providers, M=CFGFULL.models, R=CFGFULL.roles;
+ const pl=$("provList"); if(pl) pl.innerHTML = P.length? P.map((pv,i)=>
+   `<div class="pill">🔗 <b>${pv.name}</b> <span style="color:var(--dim)">${pv.base_url}</span>
+    <a style="float:right;color:#e06c75;cursor:pointer" onclick="delProv(${i})">删除</a></div>`).join("")
+   : "<div style='color:var(--dim);font-size:12px'>尚未添加连接</div>";
+ const mp=$("m_prov"); if(mp) mp.innerHTML = P.map(pv=>`<option value="${pv.name}">${pv.name}</option>`).join("");
+ const ml=$("modelList"); if(ml) ml.innerHTML = M.length? M.map((mm,i)=>
+   `<div class="pill">🧩 <b>${mm.model}</b> <span style="color:var(--dim)">@${mm.provider}</span>
+    <a style="float:right;color:#e06c75;cursor:pointer" onclick="delModel(${i})">删除</a></div>`).join("")
+   : "<div style='color:var(--dim);font-size:12px'>尚未添加模型</div>";
+ if(!$("r_draft")) return;
+ const opts = sel => "<option value=''>— 未指派 —</option>" +
+   M.map(mm=>`<option value="${mm.id}" ${R[sel]===mm.id?"selected":""}>${mm.id}</option>`).join("");
+ $("r_draft").innerHTML = opts("draft");
+ $("r_ext").innerHTML = opts("extract");
+ $("r_judge").innerHTML = opts("judge");}
+function addProv(){const n=$("p_name").value.trim(),u=$("p_url").value.trim();
+ if(!n||!u){alert("名称与 Base URL 必填");return}
+ CFGFULL.providers.push({name:n,base_url:u,api_key:$("p_key").value.trim()});renderCfg();}
+function delProv(i){const name=CFGFULL.providers[i].name;
+ CFGFULL.providers.splice(i,1);
+ CFGFULL.models = CFGFULL.models.filter(m=>m.provider!==name);
+ renderCfg();}
+function addModel(){const pv=$("m_prov").value,mm=$("m_name").value.trim();
+ if(!pv||!mm){alert("先选连接并填 Model 名");return}
+ const id=pv+"/"+mm;
+ if(CFGFULL.models.some(x=>x.id===id)){alert("已存在");return}
+ CFGFULL.models.push({id,provider:pv,model:mm});renderCfg();}
+function delModel(i){const id=CFGFULL.models[i].id;
+ CFGFULL.models.splice(i,1);
+ for(const k of ["draft","extract","judge"]) if(CFGFULL.roles[k]===id) CFGFULL.roles[k]="";
+ renderCfg();}
+async function saveCfg(){
+ CFGFULL.roles.draft=$("r_draft").value;CFGFULL.roles.extract=$("r_ext").value;
+ CFGFULL.roles.judge=$("r_judge").value;
+ await api("/api/config",{full:true,providers:CFGFULL.providers,
+  models:CFGFULL.models,roles:CFGFULL.roles});
+ alert("已保存");}
  extract_model:$("c_ext").value,judge_model:$("c_judge").value});
  alert("已保存");refresh()}
 function drawRead(){/* 章节阅读器由写作台的章节表点击进入 */}
