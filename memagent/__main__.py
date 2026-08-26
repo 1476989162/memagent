@@ -139,6 +139,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="执行一次睡眠巩固并落盘")
     parser.add_argument("--distill-session", metavar="JSON_FILE",
                         help="会话记录 JSON 提炼决策入库（需 OPENAI_* 环境变量）")
+    parser.add_argument("--diagnostics", action="store_true",
+                        help="打印脱敏诊断报告（零记忆内容，可自愿分享用于改进）")
     parser.add_argument("--version", action="version", version=f"memagent {__version__}")
     args = parser.parse_args(argv)
     if args.inject is not None:
@@ -147,6 +149,13 @@ def main(argv: list[str] | None = None) -> int:
         return _sleep_once(args)
     if args.distill_session:
         return _distill_session(args)
+    if args.diagnostics:
+        from .diagnostics import build_report
+
+        store = MemoryStore(path=str(Path(args.persist).resolve()))
+        print(json.dumps(build_report(store, version=__version__),
+                         ensure_ascii=False, indent=2))
+        return 0
     if args.check:
         return _check(args.persist)
     if args.migrate_work:
