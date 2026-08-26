@@ -58,7 +58,8 @@ def test_expansion_off_matches_original_behavior():
     """query_expansion=False 时 rel 等于原始查询的余弦 × boost（无变体参与）。"""
     from memagent.embedding import cosine_similarity, embed_text
 
-    a = MemoryAgent(cfg=AgentConfig(query_expansion=False, reconsolidate=False))
+    a = MemoryAgent(cfg=AgentConfig(query_expansion=False, reconsolidate=False,
+                                    keyword_hybrid=False))
     mem = a.remember("我昨天去吃了火锅", importance=0.1)
     h = a.retrieve("昨天中午用餐了吗", k=1)[0]
     expected = cosine_similarity(embed_text("昨天中午用餐了吗"), mem.embedding)
@@ -192,16 +193,18 @@ def test_demote_reembedding_drops_rel_below_gate():
 
 def test_rerank_rescues_cold_content_only_word():
     """重排兜底：content 含查询词但摘要丢弃（rel≈0）的 Cold 记忆，短查询子串优先
-    仍把它找回排最前——即使其 total 远低于碰撞噪声（0.000 < 0.238）。"""
-    a = MemoryAgent(cfg=AgentConfig(reconsolidate=False))
+    仍把它找回排最前。v0.3.1 符号哈希：噪声记忆 rel≈0——「压过碰撞噪声」的前提
+    已不存在，兜底的意义变成「把含词记忆顶到最前」而非「从噪声里救回」。"""
+    a = MemoryAgent(cfg=AgentConfig(reconsolidate=False, keyword_hybrid=False))
     cold = a.store.add("开发决策：遗忘斜率对比用触底时间而非斜率比", importance=0.05)
     cold.demote_to_cold("开发决策：遗忘斜率对比")   # 摘要丢「触底」
     noise = a.store.add("对照实验靠可注入时钟确定性快进", importance=0.9)
     hits = a.retrieve("触底", k=2)
     cold_h = next(h for h in hits if h.memory is cold)
     noise_h = next(h for h in hits if h.memory is noise)
-    assert cold_h.total < noise_h.total     # rel≈0 → total 低于噪声
-    assert hits[0].memory is cold           # 但子串优先（content 含词）兜底找回
+    assert noise_h.relevance == 0.0     # 碰撞噪声已消除（无共享 gram）
+    assert cold_h.relevance == 0.0      # 摘要无词 → 语义不可及（需 /recall 唤醒）
+    assert hits[0].memory is cold       # 子串优先（content 含词）兜底找回
 
 
 def test_rerank_orders_rescued_cold_by_total_within_group():
@@ -221,7 +224,7 @@ def test_retrieve_rerank_matches_cold_summary_case_insensitive():
     """核心 retrieve：Cold 记忆按摘要参与重排——查询词只在摘要里（content 不含）
     且大小写不敏感（「ai」命中摘要「AI…」）——含词 Cold 记忆压过碰撞噪声排最前；
     关闭重排时噪声（total 更高）排前，证明命中来自重排的摘要检查。"""
-    a_on = MemoryAgent(cfg=AgentConfig(reconsolidate=False))
+    a_on = MemoryAgent(cfg=AgentConfig(reconsolidate=False, keyword_hybrid=False))
     cold = a_on.store.add("用户聊过一次项目背景", importance=0.1)
     cold.demote_to_cold("开发决策：AI 分类链路已跑通（OpenAI 兼容）")
     a_on.store.add("对照实验靠可注入时钟确定性快进", importance=0.9)
@@ -235,7 +238,11 @@ def test_retrieve_rerank_matches_cold_summary_case_insensitive():
     c2.demote_to_cold("开发决策：AI 分类链路已跑通（OpenAI 兼容）")
     a_off.store.add("对照实验靠可注入时钟确定性快进", importance=0.9)
     hits_off = a_off.retrieve("ai", k=2)
-    assert hits_off and hits_off[0].memory is not c2  # 关重排：噪声 total 更高排前
+    # v0.3.1 符号哈希：无关记忆的 rel≈0（碰撞偏置消除），冷摘要命中不再
+    # 依赖重排兜底也能排前——重排降级为防御性二道防线而非必要修复。
+    noise_off = next(h for h in hits_off if h.memory is not c2)
+    assert noise_off.relevance == 0.0
+    assert hits_off[0].memory is c2
 
 
 def test_retrieve_rerank_matches_cold_summary_via_real_sleep():
@@ -244,7 +251,7 @@ def test_retrieve_rerank_matches_cold_summary_via_real_sleep():
     不含），含词 Cold 记忆压过 total 更高的碰撞噪声排最前（默认配置）。"""
     clock = [1000.0]
     a = MemoryAgent(
-        cfg=AgentConfig(reconsolidate=False, sleep_interval_turns=999),
+        cfg=AgentConfig(reconsolidate=False, keyword_hybrid=False, sleep_interval_turns=999),
         now_fn=lambda: clock[0],
     )
     target = a.store.add("我昨天去学了 python", importance=0.1)           # episodic
@@ -257,7 +264,9 @@ def test_retrieve_rerank_matches_cold_summary_via_real_sleep():
     assert "AI" in target.summary and "AI" not in target.content  # 词只在合并摘要
     hits = a.retrieve("ai", k=3)
     assert hits and hits[0].memory is target   # 摘要命中排最前
-    assert hits[0].total < next(h.total for h in hits if h.memory is noise)  # 压过更高 total 的噪声
+    # v0.3.1 符号哈希：无关噪声 rel≈0（碰撞偏置消除，不再有虚高 total）
+    noise_hit = next(h for h in hits if h.memory is noise)
+    assert noise_hit.relevance == 0.0
 
 
 def test_substring_priority_order_score_of_overrides_strength():
@@ -281,9 +290,12 @@ def test_substring_priority_order_score_of_overrides_strength():
 
 def test_retrieve_rerank_group_internal_order_by_total():
     """核心 retrieve：含词记忆组内按 rel×强度（total）排序——低相关但高强度的
-    含词记忆不再压过更高相关（但强度略低）的含词记忆。"""
-    a = MemoryAgent(cfg=AgentConfig(reconsolidate=False))
-    low_rel = a.remember("开发决策：遗忘斜率对比用触底时间而非每 τ 斜率比", importance=0.9)
+    含词记忆不再压过更高相关（但强度略低）的含词记忆。
+
+    v0.3.1 符号哈希重校准：低相关记忆换成无连续重叠的长句（共享 bigram 被
+    长度摊薄），rel 差距拉开——测试意图不变：rel 信号能战胜强度差。"""
+    a = MemoryAgent(cfg=AgentConfig(reconsolidate=False, keyword_hybrid=False))
+    low_rel = a.remember("开发决策：遗忘曲线学习器的触底段不参与反推，避免无衰减信息污染估计", importance=0.9)
     high_rel = a.remember("开发决策：触底", importance=0.1)
     hits = a.retrieve("触底", k=2)
     by_content = {h.memory.content: h for h in hits}
@@ -361,12 +373,16 @@ def test_retrieve_rerank_flag_disabled():
 
 
 def test_retrieve_rerank_custom_short_len():
-    """AgentConfig.rerank_short_len 自定义阈值：4 字查询默认按 total（碰撞噪声排前），
-    阈值放宽到 5 后子串优先（含词记忆排最前）。"""
+    """AgentConfig.rerank_short_len 自定义阈值：4 字查询默认按 total（词汇重叠但
+    不含完整子串的高强度噪声排前），阈值放宽到 5 后子串优先（含词记忆排最前）。
+
+    v0.3.1 符号哈希重校准：噪声改为与查询共享 bigram 的短句（高强度 → total
+    更高），不再依赖旧加性哈希的碰撞噪声。"""
     def _build(short_len):
-        a = MemoryAgent(cfg=AgentConfig(reconsolidate=False, rerank_short_len=short_len))
+        a = MemoryAgent(cfg=AgentConfig(reconsolidate=False, rerank_short_len=short_len,
+                                        keyword_hybrid=False))
         a.remember("遗忘斜率对比用触底时间而非斜率比", importance=0.05)
-        a.remember("对照实验靠可注入时钟确定性快进", importance=0.9)
+        a.remember("触底的时间", importance=0.9)
         return a.retrieve("触底时间", k=2)
 
     hits_default = _build(3)   # 默认：4 字不算短 → 严格按 total（噪声 total 更高排前）

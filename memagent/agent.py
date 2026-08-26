@@ -73,6 +73,12 @@ class AgentConfig:
     query_expansion: bool = True            # 检索同义扩展（问法与记忆措辞不同也能命中）
     rerank_short_query: bool = True         # 短查询子串优先重排总开关（< rerank_short_len 字）
     rerank_short_len: int = SHORT_QUERY_LEN  # 短词阈值：查询少于该字数视为"短"，可自定义
+    # --- 混合检索：词汇覆盖通道与语义向量取大 ---
+    # 动机：纯向量对代码标识符、精确术语（库名/函数名/型号）召回弱——
+    # 语义嵌入把「vxe-table」和中文踩坑记录的距离拉得很开。词汇覆盖
+    # （查询 gram 被记忆命中的比例）恰好补这条腿；两者取大保底。
+    keyword_hybrid: bool = True             # 混合检索总开关
+    keyword_weight: float = 0.30            # 词汇覆盖通道权重（相对语义满分 1.0）
     # --- 按记忆类型分遗忘曲线：技能慢、语义中、情景快 ---
     # 所有时间参数已在人类级秒数上乘以 TIME_SCALE（默认 1/86400，1 agent-秒≈1人类-天）
     # 使学习器几秒即可跑完完整遗忘周期，测试可行
@@ -1600,17 +1606,59 @@ class MemoryAgent:
         # 查询同义扩展：生成变体（人称互换/同义词替换），对每条记忆取最大相似度。
         # 原始查询恒在变体里，故扩展只会提高真实相关记忆的 rel，不会变差。
         if self.cfg.query_expansion:
-            qvs = [embed_text(q) for q in expand_query(query)]
+            qvariants = expand_query(query)
         else:
-            qvs = [qv]
+            qvariants = [query]
+        qvs = [embed_text(q) for q in qvariants]
+        # 词汇重叠用的精确 gram 集（与嵌入同源，供混合检索 IDF 通道使用）
+        qgram_sets = [set(ngrams(q)) for q in qvariants]
         self.last_reconsolidated = []
+        # --- 混合检索的 IDF 通道（两遍扫描）---
+        # 稀有 gram（标识符/专名）idf 高、常见中文 gram idf 趋零——词汇得分
+        # 由稀有词主导，天然免疫「塞满常用词的短无关记忆」，也免疫「长记忆
+        # 稀释标识符」——这正是纯向量检索的两个盲区。
+        kw_enabled = self.cfg.keyword_hybrid and bool(qgram_sets[0])
+        kw_gram_sets: list[set] = []
+        kw_df: dict = {}
+        if kw_enabled:
+            for _m in self.store.all():
+                _b = (_m.summary if (_m.tier is Tier.COLD and _m.summary)
+                      else _m.content)
+                gs = set(ngrams(_b))
+                kw_gram_sets.append(gs)
+                for g in qgram_sets[0] & gs:
+                    kw_df[g] = kw_df.get(g, 0) + 1
+            n_docs = len(kw_gram_sets)
+
+            def _kw_idf(g: str) -> float:
+                return math.log((n_docs + 1) / (kw_df.get(g, 0) + 0.5))
+
+            # 分母只计语料中实际出现的查询 gram：衡量「查询里可获得的信息
+            # 被这条记忆覆盖了多少」——否则语料外 gram 的超高 idf 会淹没分子
+            _kw_denom = sum(_kw_idf(g) for g in qgram_sets[0]
+                            if kw_df.get(g, 0) > 0)
+
+            def _kw_score(m_grams: set) -> float:
+                if _kw_denom <= 1e-9:
+                    return 0.0
+                inter = qgram_sets[0] & m_grams
+                return sum(_kw_idf(g) for g in inter) / _kw_denom
+
         hits: list[Retrieved] = []
-        for mem in self.store.all():
+        for idx, mem in enumerate(self.store.all()):
             if mem.tier is Tier.HOT:
                 boost = QUERY_BOOST_HOT
             else:
                 boost = 1.0
-            rel = max(cosine_similarity(q, mem.embedding) for q in qvs) * boost
+            rel_vec = max(cosine_similarity(q, mem.embedding) for q in qvs)
+            if kw_enabled:
+                # 融合语义：加权和但以向量为下限——词汇通道只负责救起纯向量
+                # 查不到的精确术语/稀释标识符，绝不拖累强语义匹配（否则零词汇
+                # 覆盖会把 1.0 的语义命中稀释成 0.55）
+                blended = ((1.0 - self.cfg.keyword_weight) * rel_vec
+                           + self.cfg.keyword_weight * _kw_score(kw_gram_sets[idx]))
+                rel_vec = max(rel_vec, blended)
+            rel = rel_vec * boost
             if mem.kind == "turn":
                 rel *= TURN_PENALTY
             strength = self._strength(mem)
