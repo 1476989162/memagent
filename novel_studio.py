@@ -210,6 +210,11 @@ def _task_generate(words: int) -> dict:
         raise RuntimeError("draft model not configured")
     _job_log("初始化写作 agent…")
     agent = _active_agent()
+    resolved = agent._work_title()
+    if resolved in ("", "未命名作品"):
+        raise RuntimeError(
+            "书名锚点缺失：请确认作品库里有《书名》格式的设定记忆"
+            "（新建向导会自动写入）。拒绝写入未命名目录。")
     title = Path(ACTIVE["path"]).name
     _job_log(f"开始生成《{title}》下一章（目标 {words} 字，含审校循环）")
     result = agent.write_chapter(target_words=words, with_web=False)
