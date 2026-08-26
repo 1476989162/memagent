@@ -132,16 +132,30 @@ def _job_log(msg: str) -> None:
 
 # ---------- 后台任务 ----------
 
+_REASON_HINT = {
+    "no-llm": "未配置正文模型 → 去 ⚙设置·模型 填写「正文初稿」",
+    "llm-error": "LLM 调用失败（限流/网络），稍后重试",
+    "writer-busy": "上一章仍在写作中，请稍候",
+    "chapter-conflict": "目标章节文件已存在",
+}
+
 def _task_generate(words: int) -> dict:
+    if not (CFG.get("draft_model") or "").strip():
+        raise RuntimeError("未配置正文模型：请到 ⚙ 设置·模型 填写后重试")
     _job_log("初始化写作 agent…")
     agent = _active_agent()
     title = Path(ACTIVE["path"]).name
     _job_log(f"开始生成《{title}》下一章（目标 {words} 字，含审校循环）")
     result = agent.write_chapter(target_words=words, with_web=False)
     agent.save()
-    _job_log("✅ 完成：" + json.dumps(
-        {k: result.get(k) for k in ("ok", "chapter", "words", "path")},
-        ensure_ascii=False))
+    if result.get("ok"):
+        _job_log("✅ 第{}章生成完成：{} 字 → {}".format(
+            result.get("chapter"), result.get("words"), result.get("path")))
+    else:
+        reason = str(result.get("reason"))
+        hint = _REASON_HINT.get(reason, "")
+        _job_log("❌ 生成失败：{} {}".format(
+            reason, ("——" + hint) if hint else ""))
     return result
 
 
@@ -258,7 +272,15 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/state":
                 works = _works()
                 ext = ACTIVE.get("path", "")
+                if ext:
+                    ext_dir = Path(ext)
+                    if ext_dir.is_dir() and (ext_dir / "memory.json").is_file()                             and not any(w["path"] == str(ext_dir) for w in works):
+                        ch = ext_dir / "chapters"
+                        n = len(list(ch.glob("第*章.md"))) if ch.is_dir() else 0
+                        works.append({"name": ext_dir.name + "（外部）",
+                                      "path": str(ext_dir), "chapters": n})
                 self._json({"cfg": CFG, "works": works,
+                            "home": str(HOME),
                             "active": ext,
                             "active_store": ACTIVE.get("store", ""),
                             "active_name": (Path(ext).name if ext else ""),
@@ -418,7 +440,7 @@ PAGE = r"""<!DOCTYPE html>
  #chapview{white-space:pre-wrap;line-height:1.9;font-size:14px;background:
    var(--panel);padding:20px;border-radius:8px;margin-top:12px}
 </style></head><body>
-<div class="side"><h1>📖 小说工作室</h1><div id="works"></div>
+<div class="side"><h1>📖 小说工作室</h1><div id="homeline" style="font-size:10px;color:var(--dim);margin:-8px 0 10px;word-break:break-all"></div><div id="works"></div>
  <button class="sec" style="width:100%" onclick="show('new')">＋ 新建作品（婴儿）</button>
  <button class="sec" style="width:100%;margin-top:6px" onclick="show('imp')">📚 精读导入</button>
  <button class="sec" style="width:100%;margin-top:6px" onclick="show('cfg')">⚙ 设置 · 模型</button>
@@ -432,11 +454,12 @@ async function api(p,b){const r=await fetch(p,{method:b?"POST":"GET",
   return r.json()}
 async function refresh(){const s=await api("/api/state");
   window.CFG=s.cfg;WORKS=s.works;ACTIVE=s.active_name||s.active;JOB=s.job;
-  $("works").innerHTML=s.works.map(w=>
+  $("homeline").textContent="家目录："+(s.home||"");
+  $("works").innerHTML=s.works.length?s.works.map(w=>
    `<div class="w ${s.active.endsWith(w.path)?'on':''}"
      onclick="openW('${w.path.replace(/\\/g,'\\\\')}')">
      📕 ${w.name}<span style="float:right;color:var(--dim)">${w.chapters}章</span></div>`
-  ).join("")||"<div style='color:var(--dim);font-size:12px'>尚无作品</div>";
+  ).join(""): "<div style='color:var(--dim);font-size:12px'>尚无作品</div>";
   if(TAB==="write")drawWrite();}
 function openW(p){api("/api/work/open",{path:p}).then(()=>{refresh();TAB="write";drawWrite();})}
 function show(t){TAB=t;t==="new"?drawNew():t==="cfg"?drawCfg():t==="read"?drawRead():t==="imp"?drawImp():drawWrite();}
