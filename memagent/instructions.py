@@ -40,6 +40,45 @@ def clip_content(text: str, mem_id: str,
     return text[:max_chars].rstrip() + _RECALL_POINTER.format(id=mem_id[:6])
 
 
+# ---------- 舌尖现象（tip-of-the-tongue）----------
+# 人脑：知道记得，一时说不出——这个状态本身是可用信号。检索低置信带
+# 不该直接丢弃，而应转成模糊线索引导深挖。
+
+TIP_LO = 0.12   # 低于此 = 纯噪声
+TIP_HI = 0.25   # 高于此 = 已是可信命中
+
+
+def build_tips(query: str, hits, lo: float = TIP_LO, hi: float = TIP_HI,
+               max_tips: int = 2) -> list[dict]:
+    """从命中列表提取「舌尖现象」线索。
+
+    relevance 落在 [lo, hi) 的记忆转成 {"hint", "id_prefix"}——调用方
+    （MCP retrieve / CLI）把它附在结果里，模型可顺势 memagent_recall 深挖。
+    """
+    from .embedding import ngrams as _ngrams
+
+    qset = set(_ngrams(query))
+    out: list[dict] = []
+    seen: set[str] = set()
+    for h in hits:
+        r = h.relevance
+        if not (lo <= r < hi):
+            continue
+        m = h.memory
+        if m.id in seen:
+            continue
+        seen.add(m.id)
+        text = m.summary or m.content
+        shared = qset & set(_ngrams(text))
+        cue = max(shared, key=len) if shared else text[:12].rstrip("：:，,。 ")
+        out.append({"hint": f"似乎有一条关于「{cue}」的记忆",
+                    "relevance": round(r, 2),
+                    "id_prefix": m.id[:6]})
+        if len(out) >= max_tips:
+            break
+    return out
+
+
 def ranked_decisions(agent: "MemoryAgent", k: int) -> list[tuple["Memory", float]]:
     """按当前强度取记忆层最强的决策（排除对话流水）。"""
     ranked = sorted(

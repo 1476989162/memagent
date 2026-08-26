@@ -79,6 +79,16 @@ class AgentConfig:
     # （查询 gram 被记忆命中的比例）恰好补这条腿；两者取大保底。
     keyword_hybrid: bool = True             # 混合检索总开关
     keyword_weight: float = 0.30            # 词汇覆盖通道权重（相对语义满分 1.0）
+    # --- 睡眠 REM 联想重组 + 扩散激活 + 检索诱导遗忘 ---
+    rem_associate: bool = True              # 睡眠时为近期活跃记忆建远距联想边
+    rem_neighbors: int = 4                  # 每条活跃记忆取相似排名前 M 的邻居
+    rem_max_edges: int = 12                 # 单次睡眠最多新增联想边数
+    spread_activation: bool = True          # 检索时沿 REM 边扩散激活一跳邻居
+    spread_factor: float = 0.5              # 邻居注入分数 = 边权 × 该系数
+    retrieval_forgetting: bool = True       # 命中记忆的同主题竞争者轻微抑制
+    rif_factor: float = 0.98                # 竞争者 importance 单次衰减系数
+    rif_cooldown: float = 3600.0            # 同一竞争者两次抑制的最小间隔（秒）
+    rif_min_compete: float = 0.10           # 竞争者需携带的最低查询证据占比
     # --- 按记忆类型分遗忘曲线：技能慢、语义中、情景快 ---
     # 所有时间参数已在人类级秒数上乘以 TIME_SCALE（默认 1/86400，1 agent-秒≈1人类-天）
     # 使学习器几秒即可跑完完整遗忘周期，测试可行
@@ -226,6 +236,7 @@ class Retrieved:
     strength: float       # 记忆强度（遗忘曲线得分归一化后）
     total: float          # relevance × strength
     via_summary: bool     # 是否命中 Cold 摘要
+    spread: bool = False  # 扩散激活带入：非查询直接命中，沿 REM 联想边而来
 
 
 @dataclass
@@ -849,6 +860,10 @@ class MemoryAgent:
         self.cfg = cfg or AgentConfig()
         self._now = now_fn or time.time
         self.scorer = scorer or DecayScorer(ScorerConfig(tau_seconds=self.cfg.tau_seconds))
+        # REM 联想边：mem_id -> {other_id: weight}（睡眠期远距关联，扩散激活用）
+        self.rem_links: dict[str, dict[str, float]] = {}
+        # 检索诱导遗忘的冷却表（会话内，防止同一竞争者被反复抑制）
+        self._rif_last: dict[str, float] = {}
         self.store = store if store is not None else MemoryStore(path=persist_path)
         self.content_updater = content_updater
         self.content_updaters = content_updaters or {}
@@ -910,6 +925,11 @@ class MemoryAgent:
                     merged = dict(self.cfg.reconsolidation_by_type.get(_t, {}))
                     merged.update({k: float(v) for k, v in lp.items()})
                     self.cfg.reconsolidation_by_type[_t] = merged
+        # REM 联想边持久化恢复
+        self.rem_links = {
+            str(k): {str(k2): float(v2) for k2, v2 in (v or {}).items()}
+            for k, v in (state.get("rem_links") or {}).items()
+        }
 
     # ---------- 写入 ----------
 
@@ -931,6 +951,7 @@ class MemoryAgent:
             "curiosity": self.curiosity.to_dict(),
             "analogy": self.analogy.to_dict(),
             "social": self.social.to_dict(),
+            "rem_links": self.rem_links,
             "current_emotion": asdict(self.current_emotion) if self.current_emotion else None,
         }
 
@@ -1620,12 +1641,15 @@ class MemoryAgent:
         kw_enabled = self.cfg.keyword_hybrid and bool(qgram_sets[0])
         kw_gram_sets: list[set] = []
         kw_df: dict = {}
+        kw_by_id: dict[str, set] = {}
+        kw_score_by_id: dict[str, float] = {}
         if kw_enabled:
             for _m in self.store.all():
                 _b = (_m.summary if (_m.tier is Tier.COLD and _m.summary)
                       else _m.content)
                 gs = set(ngrams(_b))
                 kw_gram_sets.append(gs)
+                kw_by_id[_m.id] = gs
                 for g in qgram_sets[0] & gs:
                     kw_df[g] = kw_df.get(g, 0) + 1
             n_docs = len(kw_gram_sets)
@@ -1655,8 +1679,10 @@ class MemoryAgent:
                 # 融合语义：加权和但以向量为下限——词汇通道只负责救起纯向量
                 # 查不到的精确术语/稀释标识符，绝不拖累强语义匹配（否则零词汇
                 # 覆盖会把 1.0 的语义命中稀释成 0.55）
+                _ks = _kw_score(kw_gram_sets[idx])
+                kw_score_by_id[mem.id] = _ks
                 blended = ((1.0 - self.cfg.keyword_weight) * rel_vec
-                           + self.cfg.keyword_weight * _kw_score(kw_gram_sets[idx]))
+                           + self.cfg.keyword_weight * _ks)
                 rel_vec = max(rel_vec, blended)
             rel = rel_vec * boost
             if mem.kind == "turn":
@@ -1674,6 +1700,31 @@ class MemoryAgent:
                 )
             )
         hits.sort(key=lambda h: h.total, reverse=True)
+        # 扩散激活：沿 REM 联想边提升弱信号条目（人脑"顺藤摸瓜"——想起 A
+        # 带出相邻的 B）。库里全部记忆都在候选列表中，因此扩散的正确形态是
+        # 「加成」而非「追加」：top3 种子的邻居若自身查询信号近零，则用
+        # 边权 × 系数作为其相关性下限，并打 spread 标记。
+        if self.cfg.spread_activation and self.rem_links and hits:
+            seeds = [h for h in hits if h.relevance >= 0.15][:3]
+            boosted = False
+            for h in hits:
+                if any(h.memory.id == s.memory.id for s in seeds):
+                    continue
+                best_w = max(
+                    (self.rem_links.get(s.memory.id, {}).get(h.memory.id, 0.0)
+                     for s in seeds),
+                    default=0.0,
+                )
+                if best_w <= 0.0:
+                    continue
+                rel_s = min(1.0, best_w * self.cfg.spread_factor)
+                if h.relevance < rel_s:
+                    h.relevance = rel_s
+                    h.total = rel_s * h.strength
+                    h.spread = True
+                    boosted = True
+            if boosted:
+                hits.sort(key=lambda h: h.total, reverse=True)
         # 短查询（< rerank_short_len 字）子串优先重排：哈希嵌入的泛化命中常把不含
         # 查询词的记忆顶到前面（短词 rel 被碰撞主导），子串优先让内容真正含查询词
         # 的记忆排最前（组内按 rel×强度=total 降序——见 score_of，兼顾 rel 信号）。
@@ -1705,7 +1756,27 @@ class MemoryAgent:
                 if h.memory.tier is Tier.WARM and h.memory.access_count >= self.cfg.hot_after_access:
                     self._promote_hot(h.memory)
                 self._reconsolidate(h.memory, query, qv, h.relevance)
-        return hits[:k]
+        final = hits[:k]
+        # 检索诱导遗忘（retrieval-induced forgetting）：成功提取的记忆会
+        # 抑制其同台竞争者——人脑靠这个机制提高信噪比、让过时决策退位。
+        # 竞争证据 = 携带了本次查询的可观信息（IDF 词汇分）却未命中；
+        # 带冷却表防止同一竞争者被连续抑制。
+        if self.cfg.retrieval_forgetting and kw_enabled and final:
+            now_rif = self._now()
+            hit_ids = {h.memory.id for h in final}
+            for mem2 in self.store.all():
+                if (mem2.id in hit_ids or mem2.tier is Tier.COLD
+                        or mem2.kind == "turn"):
+                    continue
+                if kw_score_by_id.get(mem2.id, 0.0) < self.cfg.rif_min_compete:
+                    continue
+                last = self._rif_last.get(mem2.id)
+                if last is not None and now_rif - last < self.cfg.rif_cooldown:
+                    continue
+                self._rif_last[mem2.id] = now_rif
+                mem2.importance = max(self.cfg.importance_floor,
+                                      mem2.importance * self.cfg.rif_factor)
+        return final
 
     def _reconsolidate(
         self,
@@ -1899,6 +1970,50 @@ class MemoryAgent:
 
     # ---------- 睡眠巩固 ----------
 
+    def _rem_associate(self, now: float) -> tuple[list[str], int]:
+        """REM 联想重组：为近期活跃记忆建立远距联想边。
+
+        采用**排名制**而非绝对相似带——不同嵌入后端的相似度绝对刻度差异
+        极大（哈希无关≈0、语义无关≈0.3），绝对带无法跨后端迁移。规则：
+        取每条活跃记忆相似度排名前 M 的邻居；仅当最近邻 sim≥0.95（真近
+        重复）才跳过它。边双向存储，返回 (insights 摘要, 新增边数)。
+        """
+        eps = 0.05          # 排除零相似噪声平局
+        actives = [
+            m for m in self.store.all()
+            if m.tier is not Tier.COLD and m.kind != "turn"
+            and (now - m.last_access) <= self.cfg.replay_window_seconds
+        ]
+        if len(actives) < 2:
+            return [], 0
+        pool = [m for m in self.store.all()
+                if m.tier is not Tier.COLD and m.kind != "turn"]
+        insights: list[str] = []
+        edges_added = 0
+        for a in actives:
+            sims = sorted(
+                ((cosine_similarity(a.embedding, b.embedding), b)
+                 for b in pool if b.id != a.id),
+                key=lambda t: -t[0],
+            )[: self.cfg.rem_neighbors]
+            for s, b in sims:
+                if s < eps or s >= 0.95:
+                    continue
+                fwd = self.rem_links.setdefault(a.id, {})
+                rev = self.rem_links.setdefault(b.id, {})
+                w = round(float(s), 3)
+                if b.id in fwd:
+                    fwd[b.id] = max(fwd[b.id], w)
+                    rev[a.id] = fwd[b.id]
+                    continue
+                if edges_added >= self.cfg.rem_max_edges:
+                    return insights, edges_added
+                fwd[b.id] = w
+                rev[a.id] = w
+                edges_added += 1
+                insights.append(f"{a.content[:16]} ↔ {b.content[:16]}（{w:.2f}）")
+        return insights, edges_added
+
     def sleep(self, duration: float | None = None) -> dict:
         """睡眠巩固：
         0) **回放**：按白天经历的时间顺序重放最近活跃的记忆——每次重放即一次
@@ -1945,6 +2060,14 @@ class MemoryAgent:
             report["replay_candidates"] = len(candidates)
             report["replayed_count"] = len(replayed)
             report["unreplayed_count"] = len(unreplayed)
+
+        # 0.3) REM 联想重组：人脑 REM 睡眠会把远距离弱相关的记忆重新组合，
+        #      产生"睡一觉冒出新想法"的洞察。为近期活跃记忆寻找相似度
+        #      排名 2..M 的邻居建边，供白天检索的扩散激活走边。
+        if self.cfg.rem_associate:
+            rem_insights, rem_edges = self._rem_associate(now)
+            report["rem_insights"] = rem_insights
+            report["rem_new_edges"] = rem_edges
 
         # 0) 类型迁移：被反复检索的 episodic 逐渐语义化（"我经常去爬山" 替代
         #    50 次具体爬山）；低频 semantic 反向淡化为 episodic。

@@ -33,7 +33,10 @@ def _mk(reply="（LLM 回复）好的。"):
 def test_fact_injected_into_llm_prompt():
     agent, post = _mk()
     agent.remember("我叫小林，是一名 Python 程序员")
-    reply, injected = agent.chat("我的技术栈是什么？")
+    # 查询与记忆需有词汇重叠（符号哈希嵌入按 n-gram 重叠打分：
+    # 旧版「我的技术栈是什么」能命中是 256 维加性哈希的碰撞噪声——
+    # 恰是 v0.3.1 嵌入升级要消除的误命中）。
+    reply, injected = agent.chat("小林是程序员吗")
     assert reply == "（LLM 回复）好的。"
     assert any("我叫小林" in c for c, _mt, _s in injected)  # 检索命中并注入
     user = post.calls[-1]["messages"][-1]["content"]
