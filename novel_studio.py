@@ -420,6 +420,8 @@ PAGE = r"""<!DOCTYPE html>
 </style></head><body>
 <div class="side"><h1>📖 小说工作室</h1><div id="works"></div>
  <button class="sec" style="width:100%" onclick="show('new')">＋ 新建作品（婴儿）</button>
+ <button class="sec" style="width:100%;margin-top:6px" onclick="show('imp')">📚 精读导入</button>
+ <button class="sec" style="width:100%;margin-top:6px" onclick="show('cfg')">⚙ 设置 · 模型</button>
 </div>
 <div class="main" id="main"></div>
 <script>
@@ -429,7 +431,7 @@ async function api(p,b){const r=await fetch(p,{method:b?"POST":"GET",
   headers:{"Content-Type":"application/json"},body:b?JSON.stringify(b):null});
   return r.json()}
 async function refresh(){const s=await api("/api/state");
-  WORKS=s.works;ACTIVE=s.active_name||s.active;JOB=s.job;
+  window.CFG=s.cfg;WORKS=s.works;ACTIVE=s.active_name||s.active;JOB=s.job;
   $("works").innerHTML=s.works.map(w=>
    `<div class="w ${s.active.endsWith(w.path)?'on':''}"
      onclick="openW('${w.path.replace(/\\/g,'\\\\')}')">
@@ -477,12 +479,17 @@ async function createW(){const b={};["name","premise","pro","ant","world","style
  b.protagonist=$("n_pro").value;b.antagonist=$("n_ant").value;
  b.worldview=$("n_world").value;b.style=$("n_style").value;
  const r=await api("/api/work/new",b);r.ok?(refresh(),drawWrite()):alert(r.error)}
-function drawCfg(){const c=JOB&&window.CFG||window.CFG||{};
+async function drawCfg(){
+ const c=(await api("/api/state")).cfg;
  $("main").innerHTML=`<h2>设置 · 模型分工</h2>
- <label>正文初稿（性价比模型）</label><input id="c_draft" value="${window.CFG?.draft_model||''}">
- <label>精读提炼（最强模型）</label><input id="c_ext" value="${window.CFG?.extract_model||''}">
- <label>审校评委</label><input id="c_judge" value="${window.CFG?.judge_model||''}">
- <p><button onclick="saveCfg()">保存</button></p>`;}
+ <label>正文初稿（性价比模型，如 deepseek-v4-flash）</label>
+ <input id="c_draft" value="${c.draft_model||''}">
+ <label>精读提炼（最强模型，如 glm-5.2）</label>
+ <input id="c_ext" value="${c.extract_model||''}">
+ <label>审校评委（建议第三方）</label>
+ <input id="c_judge" value="${c.judge_model||''}">
+ <p><button onclick="saveCfg()">💾 保存</button>
+ <span style="color:var(--dim);font-size:12px">　模型名需与你的 API 代理一致；留空则正文无 LLM、精读回退正文模型</span></p>`;}
 async function saveCfg(){await api("/api/config",{draft_model:$("c_draft").value,
  extract_model:$("c_ext").value,judge_model:$("c_judge").value});
  alert("已保存");refresh()}
