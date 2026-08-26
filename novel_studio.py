@@ -657,8 +657,6 @@ async function saveCfg(){
  await api("/api/config",{full:true,providers:CFGFULL.providers,
   models:CFGFULL.models,roles:CFGFULL.roles});
  alert("已保存");}
- extract_model:$("c_ext").value,judge_model:$("c_judge").value});
- alert("已保存");refresh()}
 function drawRead(){/* 章节阅读器由写作台的章节表点击进入 */}
 function drawImp(){$("main").innerHTML=`<h2>精读导入 · 读别人的好小说</h2>
  <label>小说 txt 路径</label><input id="i_txt" placeholder="D:\\books\\某畅销书.txt">
