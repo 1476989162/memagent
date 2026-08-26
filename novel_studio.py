@@ -357,11 +357,21 @@ class Handler(BaseHTTPRequestHandler):
                                     ("running", "type", "status",
                                      "log", "result")}})
             elif route == "/api/chapters":
-                base = _chapters_dir()
-                files = list(base.glob("第*章.md"))
-                for sub in base.glob("*"):
-                    if (sub / "chapters").is_dir():
-                        files += (sub / "chapters").glob("第*章.md")
+                roots = []
+                if ACTIVE.get("wdir"):
+                    roots.append(Path(ACTIVE["wdir"]))
+                roots.append(Path(ACTIVE.get("path") or ""))
+                files = []
+                seen_b = set()
+                for root in roots:
+                    for b in (root / "works", root):
+                        if not b.is_dir() or b in seen_b:
+                            continue
+                        seen_b.add(b)
+                        files += b.glob("第*章.md")
+                        for sub in b.glob("*"):
+                            if (sub / "chapters").is_dir():
+                                files += (sub / "chapters").glob("第*章.md")
                 seen_p = set()
                 files = [f for f in files
                          if not (f.resolve() in seen_p
