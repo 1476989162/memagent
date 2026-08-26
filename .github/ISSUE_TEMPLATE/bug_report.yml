@@ -1,0 +1,56 @@
+name: 🐛 缺陷报告
+description: 引擎行为不符合预期、崩溃、结果异常
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先确认：记忆**内容**不要粘贴（那是你的隐私）；
+        描述现象、复现步骤与引擎信号即可。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么？
+      description: 现象 + 你期望的行为
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. python -m memagent --inject --k 5 --persist xxx.json
+        2. 调用 memagent_retrieve("...")
+        3. 返回了 ...
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 接入模式
+      options:
+        - MCP（opencode / 其他 agent）
+        - CLI REPL
+        - Python SDK
+        - HTTP Server
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: memagent 版本
+      placeholder: "0.3.2"
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: 环境
+      placeholder: "Windows 11 / Python 3.14 / 嵌入后端：hash 或 fastembed(BAAI/bge-small-zh-v1.5)"
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 诊断报告（强烈建议，可选）
+      description: python -m memagent --diagnostics --persist <路径> 的输出——零记忆内容

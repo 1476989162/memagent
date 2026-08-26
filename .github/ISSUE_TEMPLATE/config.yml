@@ -1,0 +1,4 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用疑问（非缺陷/非反馈）
+    about: 先查 README 与 docs/ 目录；仍无法解决再开讨论

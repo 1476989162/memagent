@@ -1,0 +1,33 @@
+name: 💡 使用反馈与增强建议
+description: 哪里好用、哪里别扭、希望长成什么样
+labels: ["feedback"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 反馈类型
+      options:
+        - 好用/有效的场景（请详细描述，这类信息最珍贵）
+        - 别扭/反直觉的交互
+        - 缺失的能力
+    validations:
+      required: true
+  - type: textarea
+    id: detail
+    attributes:
+      label: 具体描述
+      description: |
+        「好用」类：它帮你在什么任务上省了什么事？
+        「增强」类：你试图做什么、卡在哪一步？
+    validations:
+      required: true
+  - type: checkboxes
+    id: share-diagnostics
+    attributes:
+      label: 愿意附上脱敏诊断报告吗？
+      options:
+        - 愿意（用 --diagnostics 生成后贴在下方）
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 诊断报告（可选）

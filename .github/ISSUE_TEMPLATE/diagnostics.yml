@@ -1,0 +1,36 @@
+name: 📊 诊断报告分享
+description: 分享脱敏诊断报告，帮助 memagent 进化（零记忆内容，隐私安全）
+labels: ["diagnostics"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢分享！诊断报告只含引擎信号（版本/错误统计/性能/库规模），
+        **设计上不可能包含任何记忆内容**——已有测试守护这条隐私不变式。
+
+        生成方式：
+
+        ```
+        python -m memagent --diagnostics --persist <你的记忆库路径>
+        ```
+
+        把下方输出完整粘贴即可。若报告异常巨大（>100KB），只保留
+        `usage` 与 `notes` 两段。
+  - type: textarea
+    id: report
+    attributes:
+      label: 诊断报告 JSON
+      description: 直接粘贴 --diagnostics 的完整输出
+    validations:
+      required: true
+  - type: dropdown
+    id: usage_scene
+    attributes:
+      label: 主要使用场景
+      options:
+        - 个人知识管理 / 对话记忆
+        - 编码助手（opencode 等 agent 接入）
+        - 小说/创作管线
+        - 其他
+    validations:
+      required: true
