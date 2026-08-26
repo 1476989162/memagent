@@ -160,7 +160,7 @@ def _active_agent():
     conn = _resolve_role("draft")
     responder = (LLMResponder(base_url=conn["base_url"],
                               api_key=conn["api_key"], model=conn["model"],
-                              timeout=300.0)
+                              timeout=300.0, max_tokens=16384)
                  if conn else None)
     # 写入分类走离线关键词：避免每条 remember 都打一次 LLM（单条 6s×批量）
     return MemoryAgent(
@@ -251,7 +251,7 @@ def _task_deepread(txt_path: str, label: str, max_chunks: int) -> dict:
         raise RuntimeError("extract role not configured")
     rsp = LLMResponder(base_url=conn["base_url"],
                        api_key=conn["api_key"],
-                       model=conn["model"], timeout=240.0)
+                       model=conn["model"], timeout=240.0, max_tokens=8192)
     raw = Path(txt_path).read_bytes()
     text = None
     for enc in ("utf-8", "gb18030", "gbk"):
@@ -416,6 +416,9 @@ class Handler(BaseHTTPRequestHandler):
                     v = str(b.get(key, "")).strip()
                     if v:
                         agent.remember_setting(f"{field}：{v}", importance=0.9)
+                # 书名锚点：_work_title() 靠《…》识别书名，缺了会写进
+                # 「未命名作品」目录——必须以书名格式入库
+                agent.remember_setting(f"《{name}》：已连载 0 章", importance=0.95)
                 agent.save()
                 ACTIVE["path"] = str(d)
                 CFG["active_work"] = str(d)
