@@ -1,6 +1,13 @@
-# MemAgent Local 0.2
+# MemAgent Local 0.3.2
 
 MemAgent Local 是一个本地优先、单租户的长期记忆与自主学习引擎。它适合作为桌面 agent、个人知识助理和受控内容生产后台的嵌入式记忆层。
+
+## 当前版本能力（v0.3.2）
+
+- 核心 SDK 保持零运行时依赖。
+- 提供可选 REST API（标准库 HTTP 服务）与 MCP stdio 服务。
+- 支持默认哈希嵌入、OpenAI 兼容远程嵌入和本地 `sentence-transformers` 嵌入。
+- 语义嵌入与 MCP 依赖通过 extras 按需安装，不改变核心 SDK 的离线可用性。
 
 ## 产品边界
 

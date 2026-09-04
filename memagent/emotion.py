@@ -5,8 +5,12 @@
 设计原则：
 - 出厂基本情绪来自 Ekman 跨文化研究（恐惧/快乐/悲伤/厌恶/愤怒/惊讶/好奇/中性）
 - 调制公式模拟杏仁核-海马-前额叶回路
-- 恐惧检测 = 杏仁核短路（高负价+高唤醒 → τ 放大 100 倍）
+- 恐惧检测 = 杏仁核短路（高负价+高唤醒 → τ 放大，但受前额叶调控限制）
 - 好奇心检测 = 前额叶过滤（低自我相关+中等唤醒+正价 → τ 缩小 0.3 倍）
+- 认知重评（reappraisal）：前额叶对杏仁核的调控——对同一事件可产生不同情绪解读
+
+进化：恐惧调制从 100x 降为更合理范围（10x），并引入认知重评机制，
+模拟人脑从"杏仁核劫持"到"前额叶调控"的情绪调节能力。
 """
 from __future__ import annotations
 
@@ -72,11 +76,16 @@ K_CONGRUENCE: float = 0.5        # 情绪一致性对检索的提升系数
 # 恐惧检测
 FEAR_VALENCE: float = -0.7
 FEAR_AROUSAL: float = 0.7
-FEAR_BOOST: float = 100.0
+FEAR_BOOST: float = 10.0  # 从 100x 降为 10x——保留恐惧优势但去除极端杏仁核劫持
+FEAR_BOOST_MAX: float = 15.0  # 认知重评后上限
 
 # 好奇心检测
 NOVELTY_SELF: float = 0.3
 NOVELTY_BOOST: float = 0.3
+
+# 认知重评参数
+REAPPRAISAL_STRENGTH: float = 0.4  # 重评强度（前额叶调控能力）
+REAPPRAISAL_THRESHOLD: float = 0.5  # 触发重评的情绪唤醒阈值
 
 
 # ════════════════════════════════════════════════════════════
@@ -88,7 +97,7 @@ def tau_factor(emotion: Emotion | None) -> float:
 
     τ_effective = τ_base × τ_factor(emotion)
 
-    - 恐惧 → factor≈31 (τ 极大，几乎不遗忘)
+    - 恐惧 → factor≈3-10 (τ 延长，但不过度——前额叶调控)
     - 快乐 → factor≈0.57 (τ 缩短，快乐会淡化)
     - 好奇 → factor≈0.29 (τ 极短，看完即忘)
     - 高自我相关 → factor > 1 (与自我相关更牢)
@@ -103,9 +112,9 @@ def tau_factor(emotion: Emotion | None) -> float:
     self_contrib = 1.0 + e.self_relevance * K_SELF_TAU
     factor = valence_contrib * arousal_contrib * self_contrib
 
-    # 恐惧（杏仁核短路）
+    # 恐惧（杏仁核短路）——受前额叶调控，上限为 FEAR_BOOST_MAX
     if e.valence < FEAR_VALENCE and e.arousal > FEAR_AROUSAL:
-        factor *= FEAR_BOOST
+        factor *= min(FEAR_BOOST_MAX, FEAR_BOOST)
 
     # 好奇心/新奇（低相关 + 中等唤醒 + 正价 → 快速丢弃）
     if (e.self_relevance < NOVELTY_SELF
@@ -114,6 +123,52 @@ def tau_factor(emotion: Emotion | None) -> float:
         factor *= NOVELTY_BOOST
 
     return max(0.01, factor)
+
+
+def reappraise(emotion: Emotion,
+               positive_reframe: bool = True,
+               strength: float = REAPPRAISAL_STRENGTH) -> Emotion:
+    """认知重评：前额叶对杏仁核的调控——用不同方式解读事件，改变情绪反应。
+
+    对应人脑的情绪调节策略（Gross, 1998）：
+    - 情境重评：换一个角度看同一件事
+    - 分心：把注意力从情绪刺激上移开
+    - 抑制：抑制情绪表达（效果较差）
+
+    这里实现"积极重评"（positive reappraisal）：
+    - 负面事件 → 找到积极面（降低负价、降低唤醒）
+    - 正面事件 → 保持或略微提升
+
+    去除人类短处：人类易陷入"反刍思维"（rumination），
+    认知重评模拟前额叶抑制杏仁核过度反应的能力。
+    """
+    e = emotion.clamp()
+
+    if e.arousal < REAPPRAISAL_THRESHOLD:
+        # 低唤醒情绪不需要重评
+        return e
+
+    if positive_reframe:
+        # 积极重评：负面事件的价向中性/正面方向移动
+        if e.valence < 0:
+            new_valence = e.valence + (1.0 - abs(e.valence)) * strength
+        else:
+            new_valence = e.valence
+
+        # 降低唤醒（前额叶抑制杏仁核）
+        new_arousal = e.arousal * (1.0 - strength * 0.5)
+
+        # 自我相关略微下调（"这不是针对我的"）
+        new_self = e.self_relevance * (1.0 - strength * 0.2)
+
+        return Emotion(
+            valence=max(-1.0, min(1.0, new_valence)),
+            arousal=max(0.0, min(1.0, new_arousal)),
+            self_relevance=max(0.0, min(1.0, new_self)),
+            label=f"reappraised_{e.label}",
+        )
+
+    return e
 
 
 def encoding_factor(emotion: Emotion | None) -> float:

@@ -41,15 +41,17 @@ def build_responder(post=None) -> LLMResponder:
 
 
 def injected_from(hits, k: int = 3) -> list[tuple[str, str, float]]:
-    """把检索命中转成注入格式 [(内容, 类型, 强度)]，弱相关（total≤0.05）剔除。
+    """把检索命中转成注入格式 [(内容, 类型, 强度)]，弱相关（total≤RELEVANT_TOTAL）剔除。
 
     Cold 命中（via_summary）注入**摘要文本**而非深藏 content——命中词在摘要里，
     content 可能不含（与核心 _template_reply / _generate_reply 行为一致）。
     """
+    from memagent.agent import RELEVANT_TOTAL
+
     return [
         (h.memory.summary or h.memory.content, h.memory.mtype.value, h.strength)
         for h in hits[:k]
-        if h.total > 0.05
+        if h.total > RELEVANT_TOTAL
     ]
 
 

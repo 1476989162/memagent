@@ -199,9 +199,14 @@ class LLMResponder:
             for model in models:
                 self._set_active_model(model)
                 model_thinking = _thinking_mode(self.thinking, self.base_url, model)
-                request_max_tokens = max_tokens or self.max_tokens or (
+                user_max = max_tokens or self.max_tokens
+                request_max_tokens = user_max or (
                     4096 if model_thinking == "enabled" else 1024
                 )
+                if _is_sensenova(self.base_url, model) and user_max is None and model_thinking == "enabled":
+                    # 推理模型先烧 reasoning 再出正文——预算不足时
+                    # finish=length 且 content 恒空（实测 4096 不够）
+                    request_max_tokens = max(request_max_tokens, 16384)
                 payload = {
                     "model": model,
                     "temperature": 0.3,

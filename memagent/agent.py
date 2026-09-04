@@ -21,9 +21,19 @@ from .compat import call_responder
 from .decay import DecayScorer, ScorerConfig
 from .embedding import cosine_similarity, embed_text, ngrams, normalize
 from .innate import INNATE_DEFAULTS, InnateBounds, TIME_SCALE, default_innate_bounds
+from .human import (
+    ContextualEncoding, Context,
+    MetacognitiveMonitor, MetacognitiveRecord, JudgmentType,
+    BiasDetector, BiasType,
+    ProspectiveMemory,
+    ElaborativeRehearsal,
+    MemoryTriage, TriageResult,
+    SpacedRepetitionOptimizer, SpacedRepetitionItem,
+)
 from .emotion import (
     Emotion, BASIC_EMOTIONS, infer_emotion,
     tau_factor, encoding_factor, congruence_factor,
+    reappraise,
 )
 # 情绪参数约定：
 #   emotion 不传（_UNSET）→ 自动从文本关键词推断
@@ -88,7 +98,7 @@ class AgentConfig:
     retrieval_forgetting: bool = True       # 命中记忆的同主题竞争者轻微抑制
     rif_factor: float = 0.98                # 竞争者 importance 单次衰减系数
     rif_cooldown: float = 3600.0            # 同一竞争者两次抑制的最小间隔（秒）
-    rif_min_compete: float = 0.10           # 竞争者需携带的最低查询证据占比
+    rif_min_compete: float = 0.10            # 竞争者需携带的最低查询证据占比
     # --- 按记忆类型分遗忘曲线：技能慢、语义中、情景快 ---
     # 所有时间参数已在人类级秒数上乘以 TIME_SCALE（默认 1/86400，1 agent-秒≈1人类-天）
     # 使学习器几秒即可跑完完整遗忘周期，测试可行
@@ -931,6 +941,16 @@ class MemoryAgent:
             for k, v in (state.get("rem_links") or {}).items()
         }
 
+        # 人类优势增强与短处去除模块（v3 进化）
+        hx = state.get("human_strengths") or {}
+        self.contextual_encoding = ContextualEncoding.from_dict(hx.get("contextual_encoding"))
+        self.metacognition = MetacognitiveMonitor.from_dict(hx.get("metacognition"))
+        self.bias_detector = BiasDetector.from_dict(hx.get("bias_detector"))
+        self.prospective = ProspectiveMemory.from_dict(hx.get("prospective"))
+        self.elaboration = ElaborativeRehearsal.from_dict(hx.get("elaboration"))
+        self.triage = MemoryTriage.from_dict(hx.get("triage"))
+        self.spaced_rep = SpacedRepetitionOptimizer.from_dict(hx.get("spaced_rep"))
+
     # ---------- 写入 ----------
 
     def classify_text(self, content: str, kind: str = "fact") -> tuple[MemType, float, str]:
@@ -953,6 +973,15 @@ class MemoryAgent:
             "social": self.social.to_dict(),
             "rem_links": self.rem_links,
             "current_emotion": asdict(self.current_emotion) if self.current_emotion else None,
+            "human_strengths": {
+                "contextual_encoding": self.contextual_encoding.to_dict(),
+                "metacognition": self.metacognition.to_dict(),
+                "bias_detector": self.bias_detector.to_dict(),
+                "prospective": self.prospective.to_dict(),
+                "elaboration": self.elaboration.to_dict(),
+                "triage": self.triage.to_dict(),
+                "spaced_rep": self.spaced_rep.to_dict(),
+            },
         }
 
     def save(self, path: str | None = None) -> None:
@@ -1058,6 +1087,18 @@ class MemoryAgent:
             mtype=mtype, mtype_confidence=mtype_conf, now=self._now(),
         )
         mem.emotion = emotion
+
+        # 情境编码（v3 进化）：为当前记忆附加情境线索
+        ctx = Context(
+            timestamp=self._now(),
+            emotion_label=emotion.label if emotion else "neutral",
+            activity="remember",
+        )
+        self.contextual_encoding.encode(mem.id, ctx, strength=importance)
+
+        # 间隔重复（v3 进化）：新记忆加入复习队列
+        self.spaced_rep.add_item(mem.id)
+
         self._record_sample(mem)
         return mem
 
@@ -1166,7 +1207,9 @@ class MemoryAgent:
                     f"- {r['title']}（{r['url']}）: {r['snippet'][:120]}"
                     for r in results
                 ) or "（无搜索结果）"
-            except Exception:
+            except Exception as e:
+                print(f"[WARN] evolve 联网搜索失败: {e}", file=__import__("sys").stderr)
+                web_block = "（联网搜索不可用）"
                 web_block = "（联网搜索不可用）"
         instruction = (
             f"【自主演化任务】你是正在自主成长的作家。基于以下你的记忆、当前人设档案"
@@ -1407,7 +1450,9 @@ class MemoryAgent:
                     f"- {r['title']}（{r['url']}）: {r['snippet'][:100]}"
                     for r in results
                 ) or "（无搜索结果）"
-            except Exception:
+            except Exception as e:
+                print(f"[WARN] 写章联网搜索失败: {e}", file=__import__("sys").stderr)
+                web_block = "（联网搜索不可用）"
                 web_block = "（联网搜索不可用）"
 
         # 已沉淀的写作改进规则（来自 critique.py 的自评沉淀）——
@@ -1480,7 +1525,9 @@ class MemoryAgent:
             tt = title_reply.strip().strip("《》「」\"")
             if 4 <= len(tt) <= 14:
                 chap_title = tt
-        except Exception:
+        except Exception as e:
+            print(f"[WARN] 章节标题推断失败: {e}", file=__import__("sys").stderr)
+            pass
             pass
 
         d = save_dir or self._work_dir(title)
@@ -1493,7 +1540,9 @@ class MemoryAgent:
             _terms = _load_terms(d)
             if _terms:
                 text, _inj = _ri(text, _terms)
-        except Exception:
+        except Exception as e:
+            print(f"[WARN] 术语注入失败: {e}", file=__import__("sys").stderr)
+            pass
             pass  # 词表缺失/损坏不阻断写章主流程
         f = Path(d) / f"第{chapter}章.md"
         header = f"# 《{title}》第{chapter}章"
@@ -1631,25 +1680,27 @@ class MemoryAgent:
         else:
             qvariants = [query]
         qvs = [embed_text(q) for q in qvariants]
-        # 词汇重叠用的精确 gram 集（与嵌入同源，供混合检索 IDF 通道使用）
+        # 词汇重叠保底用的精确 gram 集（与嵌入同源 ngrams，免哈希碰撞）
         qgram_sets = [set(ngrams(q)) for q in qvariants]
         self.last_reconsolidated = []
         # --- 混合检索的 IDF 通道（两遍扫描）---
-        # 稀有 gram（标识符/专名）idf 高、常见中文 gram idf 趋零——词汇得分
-        # 由稀有词主导，天然免疫「塞满常用词的短无关记忆」，也免疫「长记忆
-        # 稀释标识符」——这正是纯向量检索的两个盲区。
+        # pass1：为每条记忆建 gram 集 + 统计查询 gram 的文档频率。
+        # 稀有 gram（标识符/专名）idf 高、常见中文 gram idf 趋零——
+        # 词汇得分由稀有词主导，天然免疫"塞满常用词的短无关记忆"，
+        # 也免疫"长记忆稀释标识符"——这正是纯向量与 Jaccard 各自的盲区。
         kw_enabled = self.cfg.keyword_hybrid and bool(qgram_sets[0])
         kw_gram_sets: list[set] = []
         kw_df: dict = {}
         kw_by_id: dict[str, set] = {}
         kw_score_by_id: dict[str, float] = {}
         if kw_enabled:
-            for _m in self.store.all():
-                _b = (_m.summary if (_m.tier is Tier.COLD and _m.summary)
-                      else _m.content)
-                gs = set(ngrams(_b))
+            for mem in self.store.all():
+                b = (mem.summary
+                     if (mem.tier is Tier.COLD and mem.summary)
+                     else mem.content)
+                gs = set(ngrams(b))
                 kw_gram_sets.append(gs)
-                kw_by_id[_m.id] = gs
+                kw_by_id[mem.id] = gs
                 for g in qgram_sets[0] & gs:
                     kw_df[g] = kw_df.get(g, 0) + 1
             n_docs = len(kw_gram_sets)
@@ -1676,9 +1727,9 @@ class MemoryAgent:
                 boost = 1.0
             rel_vec = max(cosine_similarity(q, mem.embedding) for q in qvs)
             if kw_enabled:
-                # 融合语义：加权和但以向量为下限——词汇通道只负责救起纯向量
-                # 查不到的精确术语/稀释标识符，绝不拖累强语义匹配（否则零词汇
-                # 覆盖会把 1.0 的语义命中稀释成 0.55）
+                # 融合语义：加权和但以向量为下限——词汇通道只负责救起
+                # 纯向量查不到的精确术语/稀释标识符，绝不拖累强语义匹配
+                # （否则零词汇覆盖会把 1.0 的语义命中稀释成 0.55）
                 _ks = _kw_score(kw_gram_sets[idx])
                 kw_score_by_id[mem.id] = _ks
                 blended = ((1.0 - self.cfg.keyword_weight) * rel_vec
@@ -1687,28 +1738,41 @@ class MemoryAgent:
             rel = rel_vec * boost
             if mem.kind == "turn":
                 rel *= TURN_PENALTY
+            # 符号哈希病态兜底：余弦塌陷（< REL_CANCEL_TRIGGER）但嵌入源里
+            # 确有共享 gram → 用固定词汇重叠分保底（「我叫什么名字」↔「我叫小林」
+            # 曾算出 0.0）。零共享 / Cold 摘要不可及（content-only 词）不触发。
+            if rel < REL_CANCEL_TRIGGER:
+                base = mem.summary if (mem.tier is Tier.COLD and mem.summary) else mem.content
+                mset = set(ngrams(base))
+                if any(qs & mset for qs in qgram_sets):
+                    rel = max(rel, REL_CANCEL_FLOOR)
             strength = self._strength(mem)
             # 情绪一致性调制：当前情绪与记忆情绪相似 → 提升检索分数
             congruence = congruence_factor(self.current_emotion, mem.emotion)
+            # 情境编码加成（v3 进化）：当前情境与编码情境匹配 → 提升检索分数
+            context_bonus = self.contextual_encoding.get_context_bonus(mem.id)
             hits.append(
                 Retrieved(
                     memory=mem,
                     relevance=rel,
                     strength=strength,
-                    total=rel * strength * congruence,
+                    total=rel * strength * congruence * context_bonus,
                     via_summary=(mem.tier is Tier.COLD),
                 )
             )
         hits.sort(key=lambda h: h.total, reverse=True)
         # 扩散激活：沿 REM 联想边提升弱信号条目（人脑"顺藤摸瓜"——想起 A
         # 带出相邻的 B）。库里全部记忆都在候选列表中，因此扩散的正确形态是
-        # 「加成」而非「追加」：top3 种子的邻居若自身查询信号近零，则用
+        # 「加成」而非「追加」：top3 命中的邻居若自身查询信号近零，则用
         # 边权 × 系数作为其相关性下限，并打 spread 标记。
         if self.cfg.spread_activation and self.rem_links and hits:
+            # 种子 = 有直接查询信号的命中（rel≥0.15，最多取 3 个）；
+            # 按位置取前 3 会在微型库里把全部候选都当种子、无人可被加成
             seeds = [h for h in hits if h.relevance >= 0.15][:3]
             boosted = False
             for h in hits:
-                if any(h.memory.id == s.memory.id for s in seeds):
+                if any(h.memory.id is s.memory.id or h.memory.id == s.memory.id
+                       for s in seeds):
                     continue
                 best_w = max(
                     (self.rem_links.get(s.memory.id, {}).get(h.memory.id, 0.0)
@@ -1745,8 +1809,9 @@ class MemoryAgent:
             )
         # 记录检索命中：测试效应（仅对真正相关的）
         # 兴趣路径3（检索累积）：命中主题的兴趣值随检索分数递增
+        # 精细复述（v3 进化）：回忆时把新信息与已有知识网络关联
         for h in hits[: max(k * 2, 1)]:
-            if h.total > 0.05:
+            if h.total > RELEVANT_TOTAL:
                 content_topics = self.interest.detect_topics(h.memory.content)
                 for t in content_topics:
                     delta = self.interest.access_delta * h.total
@@ -1756,10 +1821,21 @@ class MemoryAgent:
                 if h.memory.tier is Tier.WARM and h.memory.access_count >= self.cfg.hot_after_access:
                     self._promote_hot(h.memory)
                 self._reconsolidate(h.memory, query, qv, h.relevance)
+                # 精细复述：为命中记忆构建关联网络
+                self.elaboration.elaborate(
+                    h.memory.id,
+                    self.store.all(),
+                    cosine_similarity,
+                    embed_text,
+                    threshold=0.3,
+                    max_associations=3,
+                )
+                # 间隔重复：记录成功回忆
+                self.spaced_rep.review(h.memory.id, min(1.0, h.total))
         final = hits[:k]
         # 检索诱导遗忘（retrieval-induced forgetting）：成功提取的记忆会
         # 抑制其同台竞争者——人脑靠这个机制提高信噪比、让过时决策退位。
-        # 竞争证据 = 携带了本次查询的可观信息（IDF 词汇分）却未命中；
+        # 竞争证据 = 该记忆携带了本次查询的可观信息（IDF 词汇分）却未命中；
         # 带冷却表防止同一竞争者被连续抑制。
         if self.cfg.retrieval_forgetting and kw_enabled and final:
             now_rif = self._now()
@@ -1945,7 +2021,9 @@ class MemoryAgent:
                     self.responder, query, memories=mems or None,
                     persona_extras=self.persona_sheet(),
                 )
-            except Exception:
+            except Exception as e:
+                print(f"[WARN] 自动演化 LLM 调用失败: {e}", file=__import__("sys").stderr)
+                pass
                 pass  # 回退模板
         return self._template_reply(relevant, scene=scene)
 
@@ -1962,7 +2040,7 @@ class MemoryAgent:
         detected_topics = self.interest.detect_topics(query)
         self.growth.grow_step(query, topic=detected_topics[0] if detected_topics else None)
 
-        relevant = [h for h in hits if h.total > 0.05]
+        relevant = [h for h in hits if h.total > RELEVANT_TOTAL]
         reply = self._generate_reply(query, relevant, scene=scene)
         self._observe()  # 持续观测：每轮对话后给所有记忆采样
         self.interest.apply_decay()
@@ -1997,7 +2075,7 @@ class MemoryAgent:
                 key=lambda t: -t[0],
             )[: self.cfg.rem_neighbors]
             for s, b in sims:
-                if s < eps or s >= 0.95:
+                if s < eps or s >= 0.95:      # 噪声平局 / 近重复都跳过
                     continue
                 fwd = self.rem_links.setdefault(a.id, {})
                 rev = self.rem_links.setdefault(b.id, {})
@@ -2022,6 +2100,8 @@ class MemoryAgent:
            replay_per_second 折算预算只重放一部分，**未回放的候选次日更模糊**
            （importance × replay_fog_factor）。重放不改 last_access——否则每次
            睡眠都重置衰减时钟，记忆会变得不朽。
+        0.5) **记忆分级**（v3 进化）：按重要性/情绪/近因/使用频率分级处理，
+           优先巩固高价值记忆，低价值记忆可被遗忘。
         1) 闲置过久的 Hot 记忆降级为 Warm；
         2) 久未访问的低频 Warm 记忆聚类 → 压缩为 Cold 摘要。
         返回一份"梦境报告"。
@@ -2029,7 +2109,8 @@ class MemoryAgent:
         now = self._now()
         report: dict = {"hot_demoted": [], "cold_compressed": 0, "clusters": 0,
                         "migrations": 0, "replay_candidates": 0, "replayed": [],
-                        "replayed_count": 0, "unreplayed_count": 0, "fogged": []}
+                        "replayed_count": 0, "unreplayed_count": 0, "fogged": [],
+                        "triage_high": 0, "triage_medium": 0, "triage_low": 0}
 
         # 0) 睡眠回放：先于迁移/压缩——被重放的记忆获得再激活强化（可能因此
         #    逃过压缩、推动情景语义化）；候选 = 非 Cold、非对话流水、最近窗口内
@@ -2062,12 +2143,22 @@ class MemoryAgent:
             report["unreplayed_count"] = len(unreplayed)
 
         # 0.3) REM 联想重组：人脑 REM 睡眠会把远距离弱相关的记忆重新组合，
-        #      产生"睡一觉冒出新想法"的洞察。为近期活跃记忆寻找相似度
-        #      排名 2..M 的邻居建边，供白天检索的扩散激活走边。
+        #      产生"睡一觉冒出新想法"的洞察。这里为近期活跃记忆寻找相似度
+        #      排名 2..M 的邻居（最近邻多为同簇/近重复，跳过）建联想边，
+        #      供白天检索的扩散激活走边。
         if self.cfg.rem_associate:
             rem_insights, rem_edges = self._rem_associate(now)
             report["rem_insights"] = rem_insights
             report["rem_new_edges"] = rem_edges
+
+        # 0.5) 睡眠记忆分级（v3 进化）：按价值分级处理
+        #    高价值记忆优先巩固，低价值记忆可被遗忘（减轻认知负担）
+        if duration is None:  # 完整睡眠时才做分级
+            all_warm = [m for m in self.store.all() if m.tier is Tier.WARM]
+            triage_results = self.triage.triage(all_warm)
+            report["triage_high"] = len(self.triage.get_high_priority(triage_results))
+            report["triage_medium"] = len(self.triage.get_medium_priority(triage_results))
+            report["triage_low"] = len(self.triage.get_low_priority(triage_results))
 
         # 0) 类型迁移：被反复检索的 episodic 逐渐语义化（"我经常去爬山" 替代
         #    50 次具体爬山）；低频 semantic 反向淡化为 episodic。
@@ -2247,7 +2338,7 @@ class MemoryAgent:
         安静时的场景闪回、睡前对白天的运转，都是把多条相关记忆按经历
         顺序重新组合成一段连贯叙事。
 
-        - **种子**：检索命中（total > 0.05，排除对话流水）。未提供 hits 时
+        - **种子**：检索命中（total > RELEVANT_TOTAL，排除对话流水）。未提供 hits 时
           内部调用 retrieve()（种子照常获得检索测试效应与再巩固）；
         - **扩展**：与任一种子"相关"（`_fragment_relatedness`：嵌入余弦与
           n-gram 共享度取大 ≥ scene_similarity）的其它记忆，且出生时间在
@@ -2268,7 +2359,7 @@ class MemoryAgent:
         now = self._now()
         if hits is None:
             hits = self.retrieve(query, k)
-        seeds = [h for h in hits if h.total > 0.05 and h.memory.kind != "turn"]
+        seeds = [h for h in hits if h.total > RELEVANT_TOTAL and h.memory.kind != "turn"]
         if not seeds:
             self.last_scene = None
             return None
@@ -3096,7 +3187,7 @@ class MemoryAgent:
                     for line in sheet.splitlines():
                         print(f"  {line}")
                 else:
-                    print("  （还没有设定记忆——用 remember_setting() 写入作品设定后，") 
+                    print("  （还没有设定记忆——用 remember_setting() 写入作品设定后，")
                     print("    这里会随记忆累积出可注入的人设档案）")
                 continue
             if text == "/models":
@@ -3177,7 +3268,7 @@ class MemoryAgent:
             reply, hits = self.respond(text)
             print(f"Agent> {reply}")
             if hits:
-                print(f"  （检索到 {len([h for h in hits if h.total > 0.05])} 条相关记忆）")
+                print(f"  （检索到 {len([h for h in hits if h.total > RELEVANT_TOTAL])} 条相关记忆）")
             if self.last_reconsolidated:
                 print(f"  （回忆再巩固：按重要程度微调了 {len(self.last_reconsolidated)} 条记忆）")
 

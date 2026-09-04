@@ -23,6 +23,13 @@ from .memory import MemType, classify_memory_with_confidence
 
 def _load_dotenv() -> None:
     """从 .env 文件加载环境变量（如果存在）。不依赖 python-dotenv。"""
+    if os.environ.get("MEMAGENT_TEST"):
+        # 测试隔离：pytest conftest 置 MEMAGENT_TEST=1，跳过 .env 注入。
+        # 否则子进程 CLI 测试（recall_curve_check / session_memory /
+        # remember_agent 等）继承到真实 key 发起真实 LLM 网络调用，
+        # 慢（单次可超 60s）且不可复现——空串 key 在 Windows 上创建
+        # 子进程时会被丢弃，因此必须用非空标记。
+        return
     # 查找 .env：当前工作目录 → memagent 包所在项目的根目录
     candidates = [
         Path.cwd() / ".env",
@@ -100,6 +107,12 @@ def _message_content(message: dict) -> str:
             elif isinstance(item, dict) and item.get("type") in ("text", "output_text"):
                 parts.append(str(item.get("text", "")))
         return "".join(parts).strip()
+    # 推理模型兜底：sensenova/deepseek 系把输出放在 reasoning(_content)
+    # 字段——content 为空时回退读取，否则上层会误判「回复为空」。
+    for alt in ("reasoning_content", "reasoning"):
+        v = message.get(alt)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
     return str(content).strip() if content else ""
 
 

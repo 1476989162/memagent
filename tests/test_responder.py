@@ -157,7 +157,7 @@ def test_sensenova_reasoning_model_enables_thinking_in_auto_mode():
     )
     assert r.respond("请回答") == "这是最终答案。"
     assert post.payload["thinking"] == {"type": "enabled"}
-    assert post.payload["max_tokens"] == 4096
+    assert post.payload["max_tokens"] == 16384  # sensenova 推理模型地板，默认 4096 不够
 
 
 def test_reasoning_only_response_retries_with_thinking_disabled():

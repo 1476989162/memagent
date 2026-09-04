@@ -230,9 +230,9 @@ class Memory:
             except (KeyError, TypeError, ValueError):
                 d["emotion"] = None
         mem = cls(**d)
-        # 嵌入器升级迁移：向量维度与当前嵌入器不符（旧哈希维度、或换过
-        # 语义后端）时按当前嵌入器重建——Cold 的索引向量指向摘要而非
-        # content，与 __post_init__ 取材规则一致。维度一致则原样保留
+        # 嵌入器升级迁移：向量维度与当前嵌入器不符（旧 256 维哈希、或换过
+        # 语义后端）时按当前嵌入器重建——Cold 记忆的索引向量指向摘要而非
+        # content，与 __post_init__ 的取材规则一致。维度一致则原样保留
         # （含再巩固漂移）。
         if len(mem.embedding) != embedding_dim():
             base = mem.summary if (mem.tier == Tier.COLD and mem.summary) else mem.content

@@ -1,4 +1,4 @@
-"""Reliable local file operations used by persistence and autonomous jobs."""
+﻿"""Reliable local file operations used by persistence and autonomous jobs."""
 
 from __future__ import annotations
 
@@ -140,7 +140,9 @@ def atomic_write_text(
 
 
 def atomic_write_json(path: str | Path, data: Any, *, backup: bool = False) -> Path:
-    payload = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    # compact to avoid 157MB pretty bloat (was 67M compact vs 157M pretty)
+    # also avoid embedding bloat: caller should strip embeddings
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n"
     return atomic_write_text(path, payload, backup=backup)
 
 

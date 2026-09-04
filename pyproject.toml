@@ -21,12 +21,19 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+# 核心保持零依赖；各服务入口按需安装：
+#   pip install memagent-local[mcp]         → MCP 服务器（memagent.mcp_server）
+#   pip install memagent-local[embed-local] → 本地语义嵌入（sentence-transformers）
+mcp = ["mcp>=1.2"]
+embed-local = ["sentence-transformers>=3,<6"]
 dev = ["pytest>=8,<10", "build>=1.2,<2", "twine>=5,<7"]
 
 [project.scripts]
 memagent = "memagent.__main__:main"
 memagent-backup = "memagent.backup:main"
 memagent-release = "memagent.release:main"
+memagent-server = "memagent.server:main"
+memagent-mcp = "memagent.mcp_server:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "memagent.__version__"}

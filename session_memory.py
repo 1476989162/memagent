@@ -30,6 +30,13 @@ import sys
 
 from memagent import MemoryAgent
 from memagent.agent import AgentConfig
+from memagent.instructions import (
+    MD_GROUP_TITLES as _MD_GROUP_TITLES,
+    build_injection_md as _build_injection_md_impl,
+    export_agents_md as _export_agents_md_impl,
+    pick_decisions as _pick_decisions_impl,
+    ranked_decisions,
+)
 from memagent.memory import MemType
 from memagent.synonyms import is_short_query
 
@@ -85,36 +92,30 @@ def record(agent: MemoryAgent, commits: list[tuple[str, str]], notes: list[str])
 
 
 def _ranked_decisions(agent: MemoryAgent, k: int) -> list[tuple]:
-    """按当前强度取记忆层最强的决策（排除对话流水）。"""
-    ranked = sorted(
-        (
-            (m, agent._strength(m))
-            for m in agent.store.all()
-            if m.kind != "turn"
-        ),
-        key=lambda x: -x[1],
-    )
-    return ranked[:k]
+    """按当前强度取记忆层最强的决策（排除对话流水）。
+
+    实现已上移到 memagent.instructions（与 MCP 工具共用），此处保留
+    兼容别名。
+    """
+    return ranked_decisions(agent, k)
 
 
 def pick_decisions(agent: MemoryAgent, topic: str | None = None, k: int = 5) -> list[tuple]:
     """选择要注入的决策：主题检索（rel 排序）或按强度 top-k。返回 [(记忆, 强度)]。
 
+    核心实现在 memagent.instructions（与 MCP 工具 memagent_start 共用）；
+    此处保留 CLI 专属的短主题加长提示。
+
     短主题（< SHORT_QUERY_LEN 字）由 memagent.synonyms 的通用函数做
     子串优先重排（与 remember_agent 入口行为一致），并提示建议加长。
     """
-    if topic:
-        hits = agent.retrieve(topic, k=k)
-        picked = [(h.memory, h.strength) for h in hits if h.total > 0.05]
-        # 短主题重排已由核心 retrieve() 单点完成（含 rel×强度 组内排序）——
-        # 此处只按同一判据打印加长提示，不再重排（避免与核心排序不一致）
-        if agent.cfg.rerank_short_query and is_short_query(topic, agent.cfg.rerank_short_len):
-            # 含词计数与核心一致：content + 摘要（Cold 命中词可能只在摘要里）
-            n = sum(1 for m, _s in picked if topic.lower() in (m.content + (m.summary or "")).lower())
-            print(f"（提示：主题「{topic}」仅 {len(topic.strip())} 字，已做子串优先重排"
-                  f"[{n}/{len(picked)} 条含主题词]；建议加长以获得更精确检索）")
-        return picked[:k]
-    return _ranked_decisions(agent, k)
+    picked = _pick_decisions_impl(agent, topic, k)
+    if topic and agent.cfg.rerank_short_query and is_short_query(topic, agent.cfg.rerank_short_len):
+        # 含词计数与核心一致：content + 摘要（Cold 命中词可能只在摘要里）
+        n = sum(1 for m, _s in picked if topic.lower() in (m.content + (m.summary or "")).lower())
+        print(f"（提示：主题「{topic}」仅 {len(topic.strip())} 字，已做子串优先重排"
+              f"[{n}/{len(picked)} 条含主题词]；建议加长以获得更精确检索）")
+    return picked
 
 
 def inject_block(agent: MemoryAgent, topic: str | None = None, k: int = 5) -> list[tuple]:
@@ -134,18 +135,14 @@ INJECT_MARKER_END = "<!-- memagent-injection:end -->"
 
 
 def build_injection_md(agent: MemoryAgent, topic: str | None = None, k: int = 5) -> str:
-    """生成注入块的 markdown 文本（供写文件 / 维护 AGENTS.md 区块）。"""
-    picked = pick_decisions(agent, topic, k)
-    lines = [
-        "## 本次注入的决策记忆（memagent 自动生成）",
-        "",
-        "以下为跨会话沉淀的开发决策，按相关性/强度注入；被反复检索的决策越来越强。",
-        "",
-    ]
-    for i, (m, s) in enumerate(picked, 1):
-        lines.append(f"{i}. [{m.mtype.value}] {m.content}（强度 {s:.2f} · 检索 {m.access_count} 次）")
-    lines += ["", "> 重新运行 `python session_memory.py --inject-agents-md` 更新本区块。", ""]
-    return "\n".join(lines)
+    """生成注入块的 markdown 文本（供写文件 / 维护 AGENTS.md 区块）。
+
+    核心实现在 memagent.instructions（与 MCP 工具 memagent_start 共用）。
+    """
+    return _build_injection_md_impl(
+        agent, topic, k,
+        refresh_hint="重新运行 `python session_memory.py --inject-agents-md` 更新本区块。",
+    )
 
 
 def write_context_file(agent: MemoryAgent, path: str = "session_context.md",
@@ -165,12 +162,7 @@ def write_context_file(agent: MemoryAgent, path: str = "session_context.md",
 
 
 # 全量导出与加载评估：模拟 Claude Code/Codex 等"全量加载指令文件"的 agent
-
-_MD_GROUP_TITLES = {
-    "semantic": "项目事实与决策（语义类：稳定知识，被反复确认的越靠前）",
-    "skill": "经验与方法（技能类：被反复验证的做法）",
-    "episodic": "历史事件（情景类：随遗忘可能过时）",
-}
+# （分组标题与导出实现见 memagent.instructions，导入别名为 _MD_GROUP_TITLES）
 
 
 def export_agents_md(agent: MemoryAgent, path: str = "AGENTS.md", max_items: int = 50,
@@ -180,49 +172,19 @@ def export_agents_md(agent: MemoryAgent, path: str = "AGENTS.md", max_items: int
     与 --inject-agents-md 的区别：注入是顶部 top-k 动态区块，这里导出
     完整决策库（全部条目），供全量加载指令文件的 agent 在会话开始时读取。
 
+    核心实现在 memagent.instructions（与 MCP 工具 memagent_export 共用）。
+
     dual=True 时用同一份内容同时写入 AGENTS.md 与 CLAUDE.md（逐字节一致，
     保持同步——Codex 加载前者、Claude Code 加载后者），返回两个路径；
     否则只写 path 并返回该路径。
     """
-    mems = sorted(
-        (m for m in agent.store.all() if m.kind != "turn"),
-        key=lambda m: (-m.importance, -m.access_count),
-    )[:max_items]
-    groups: dict[str, list] = {}
-    for m in mems:
-        groups.setdefault(m.mtype.value, []).append(m)
-    lines = [
-        "# 项目决策记忆（由 memagent 自动生成）",
-        "",
-        f"生成时间：{_dt.datetime.now().strftime('%Y-%m-%d %H:%M')}；",
-        f"来源：记忆层（共 {len(mems)} 条决策）。",
-        "本文件供支持 AGENTS.md / CLAUDE.md 风格的 agent 在会话开始时加载。",
-        "重新运行 `python session_memory.py --export-agents-md` 可同时刷新",
-        "AGENTS.md 与 CLAUDE.md（内容同步）。",
-        "",
-    ]
-    for mtype in ("semantic", "skill", "episodic"):
-        items = groups.get(mtype, [])
-        if not items:
-            continue
-        lines.append(f"## {mtype} — {_MD_GROUP_TITLES[mtype]}")
-        lines.append("")
-        for m in items:
-            lines.append(
-                f"- {m.content}（重要 {m.importance:.2f} · 检索 {m.access_count} 次）"
-            )
-        lines.append("")
-    lines.append("<!-- 由 memagent 记忆层自动生成，重新运行 --export-agents-md 更新 -->")
-    text = "\n".join(lines)
-    if dual:
-        targets = ("AGENTS.md", "CLAUDE.md")
-        for t in targets:
-            with open(t, "w", encoding="utf-8") as f:
-                f.write(text)
-        return targets
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-    return path
+    return _export_agents_md_impl(
+        agent, path, max_items=max_items, dual=dual,
+        refresh_hint=(
+            "重新运行 `python session_memory.py --export-agents-md` 可同时刷新\n"
+            "AGENTS.md 与 CLAUDE.md（内容同步）。"
+        ),
+    )
 
 
 # 主题问题集：每个问题附带"文件中必须出现才能回答"的关键词

@@ -93,6 +93,24 @@ AgentConfig(rerank_short_len=5)         # 短词阈值：查询少于该字数�
 
 要求：Python 3.10+。
 
+### 作为 SDK 嵌入你的应用（推荐）
+
+```python
+from memagent import MemoryAgent
+from memagent.llm import LLMClassifier
+
+# api_key="" → 离线关键词分类；配 OPENAI_* 环境变量则自动启用 LLM 分类
+agent = MemoryAgent(classifier=LLMClassifier(api_key=""))
+
+agent.remember("用户偏好简洁回复", importance=0.9)   # 写入（自动分类/去重/情绪编码）
+hits = agent.retrieve("用户喜欢什么格式")            # 检索（遗忘曲线评分）
+report = agent.sleep()                              # 睡眠巩固（回放+分级+压缩）
+```
+
+完整示例见 `examples/quickstart.py`（含元认知校准、前瞻记忆，5 分钟读完）。
+
+### 本地运行 / 开发
+
 ```bash
 # 推荐：以可编辑模式安装产品与开发依赖
 python -m pip install -e ".[dev]"
@@ -110,7 +128,7 @@ python -m pytest tests/ -q
 memagent --check --persist memories.json
 ```
 
-### 产品版基线（v0.2）
+### 产品版基线（v0.3.2）
 
 - **可安装 CLI**：`pip install -e .` 后可直接运行 `memagent`；
 - **可靠持久化**：JSON 同目录原子发布、上一版本 `.bak` 备份、损坏时自动恢复；
@@ -126,7 +144,7 @@ memagent --check --persist memories.json
 
 ```powershell
 python -m memagent.release build --output releases
-python -m memagent.release install --wheel "releases\v0.2.1\memagent_local-0.2.1-py3-none-any.whl" --runtime .runtime
+python -m memagent.release install --wheel "releases\v0.3.2\memagent_local-0.3.2-py3-none-any.whl" --runtime .runtime
 python -m memagent.release rollback --runtime .runtime
 ```
 
@@ -1092,8 +1110,83 @@ semantic），长期不检索的自动衰减——"被反复确认的决策越�
   [--topic 主题]` 即可恢复上下文；实测 5 个主题检索 4 个 top1 精准命中
   （短词「触底」受哈希碰撞干扰，印证了"短查询泛化命中会误伤"那条决策）。
 
+## MCP 服务器：把记忆层接给任意 Agent（mcp_server.py）
+
+把 memagent 作为 **MCP 工具服务**暴露——Hermes / Claude / Codex 等支持 MCP 的
+agent 无需改代码，原生调用记忆层。核心零依赖不变，MCP 路径按需安装：
+
+```bash
+pip install "memagent-local[mcp]"        # 或 pip install mcp>=1.2
+memagent-mcp --persist memories.json     # stdio 服务器（也可 python -m memagent.mcp_server）
+```
+
+**语义嵌入（可选，突破词汇级上限）**——默认哈希嵌入零依赖、按 n-gram 重叠打分；
+跨措辞等价（「技术栈」↔「Python 程序员」）需要真语义嵌入，二选一：
+
+```bash
+# ① OpenAI 兼容远程端点（任何 /embeddings 服务，纯 stdlib 调用）
+memagent-mcp --persist memories.json --embed-base-url https://api.example.com/v1 \
+             --embed-model text-embedding-3-small --embed-api-key sk-xxx
+# ② 本地 sentence-transformers（pip install "memagent-local[embed-local]"）
+memagent-mcp --persist memories.json --embed-local paraphrase-multilingual-MiniLM-L12-v2
+```
+
+换后端后存量记忆在加载时按维度失配自动重建向量；词汇重叠保底、子串重排等
+文本级逻辑不依赖后端。SDK 内调用 `embedding.set_embedder(RemoteEmbedder(...))`
+同样生效（`embed_text` 是唯一接入点）。
+
+注册（Hermes 示例）：
+
+```bash
+hermes mcp add memagent --command python --args -m memagent.mcp_server --args --persist /path/to/memories.json
+```
+
+九个工具（与 CLI / 交互模式对齐，不只是检索一个薄面）：
+
+| 工具 | 作用 |
+| --- | --- |
+| `memagent_remember` | 写入记忆（importance ≥ 0.8 冻结为核心记忆） |
+| `memagent_retrieve` | 检索（带置信标注：`matched=false` 或 `notice` = 大概率查不到，别硬编） |
+| `memagent_forget` | 彻底删除一条记忆（CLI `/forget`） |
+| `memagent_recall` | 唤醒 Cold 摘要 → 完整记忆 + 深藏细节（CLI `/recall`） |
+| `memagent_find` | 关键词定位记忆，拿 id 供 forget / recall 用 |
+| `memagent_start` | 开工注入：按主题取相关决策组成上下文块（`--start` 的 MCP 版） |
+| `memagent_export` | 导出 AGENTS.md（dual=true 同步 CLAUDE.md；`--export-agents-md` 的 MCP 版） |
+| `memagent_sleep` | 睡眠巩固（回放 / 分级 / 压缩） |
+| `memagent_stats` | Hot/Warm/Cold 各层统计 |
+
+注入 / 导出与 `session_memory.py` **共用同一实现**（`memagent/instructions.py`），
+CLI 与 MCP 两条入口不会漂移。检索结果带 `relevance` 与 `matched` 标注：
+符号哈希嵌入（见下）让无关查询的相似度回到 0 附近，服务端据此明确说
+"无高置信命中"，而不是让调用方在碰撞噪声里硬猜。
+
+## v0.3.2 发布验证
+
+当前版本已包含可选语义嵌入、MCP stdio 服务与零依赖 REST 服务。发布前建议执行：
+
+```powershell
+python -m pip install -e ".[dev]"
+python -m pytest -q
+python -m memagent --check --persist agent_memory.json
+python -m memagent.release build --output releases
+python -m memagent.release verify --wheel releases/v0.3.2/memagent_local-0.3.2-py3-none-any.whl
+python -m memagent.release install `
+  --wheel releases/v0.3.2/memagent_local-0.3.2-py3-none-any.whl `
+  --runtime .runtime
+python -m memagent.release run --runtime .runtime -- --version
+```
+
+发布包应只包含 `memagent` 包和标准元数据，不应包含 `.env`、记忆 JSON、
+`works/`、日志、实验产物或本地虚拟环境。
+
 ## 已知局限
 
+- **默认检索仍是词汇级的**：符号哈希 n-gram 嵌入（v0.3.1）消除了加性碰撞
+  偏置——无关文本相似度回到 0 附近，「火锅撞首都」类误命中不再发生，短查询
+  的「查不到」能被诚实识别；但它本质是**字符 n-gram 重叠**，跨措辞的语义
+  等价（「技术栈」↔「Python 程序员」）默认查不到。**已可插拔**：`embedding.set_embedder()`
+  / MCP `--embed-*` 接入真语义嵌入（OpenAI 兼容远程或本地 sentence-transformers），
+  向量按维度失配自动迁移（见 MCP 章节）；
 - 提取式摘要在短文本上压缩率有限（摘要 ≈ 原文），此时 Cold 的意义主要在"埋藏"而非"省空间"；
 - 类型识别默认 LLM 分类、关键词回退，长句含多类信号时仍可能误判（可手动 `mtype` 覆盖）；
 - 429 切换是**模型级**（同一端点多个模型各有限流）；跨端点（如 DeepSeek 429 → 切本地 Ollama）需要多个 base_url 的池，当前未支持；
@@ -1102,11 +1195,20 @@ semantic），长期不检索的自动衰减——"被反复确认的决策越�
 
 ## 项目结构
 
+**分层地图**——只把 memagent 当「记忆 SDK / 记忆 MCP」用时，只需要第一层：
+
+| 层 | 模块 | 说明 |
+| --- | --- | --- |
+| **核心记忆 SDK**（零依赖） | `embedding` `decay` `memory` `synonyms` `compression` `agent`（检索/巩固部分）`instructions` `mcp_server` `server` `llm` `responder` `io_utils` | 记忆层本体 + 服务入口。MCP / SDK / HTTP 三条接入路径只走这一层 |
+| 认知扩展（零依赖） | `emotion` `interest` `graph` `growth` `cognition` `curiosity` `analogy` `social` `human` `checkers` `profiles` `visualize` `interactive` | 检索评分的增益项（情绪一致性/情境加成/兴趣等），随核心一起加载 |
+| 领域扩展（写作 / FoxTable 编码） | `architecture` `critique` `work_admin` `continuity` `reader_postproc` `literary` | 仅被根目录 `autonomous_writer.py` / `autonomous_coder.py` 等脚本调用；`MemoryAgent` 内的写作方法（`write_chapter` 等）同样只服务写作入口——记忆 MCP 的调用路径不会触及 |
+
 ```
 memagent/
-  embedding.py   哈希 n-gram 嵌入 + 余弦相似度
+  embedding.py   哈希 n-gram 嵌入 + 余弦相似度（v0.3.1：1024 维 + 符号哈希；v0.3.2 可插拔后端）
+  embedders.py   语义嵌入后端（OpenAI 兼容远程 / 本地 sentence-transformers）
   decay.py       Ebbinghaus 遗忘曲线评分
-  memory.py      Memory 模型、三层存储、类型/重要性启发式、JSON 持久化
+  memory.py      Memory 模型、三层存储、类型/重要性启发式、JSON 持久化（旧向量自动迁移）
   synonyms.py    查询同义扩展（人称互换 + 同义词变体）
   llm.py         LLM 类型分类器 + ModelPool（429 多模型自动切换/全限流等待重试）
   responder.py   LLM 回复生成器（检索结果注入上下文；人设 persona + 演化档案注入；无 key 回退模板）
@@ -1114,6 +1216,9 @@ memagent/
   compression.py 提取式摘要 + 相似记忆聚类合并
   agent.py       MemoryAgent：检索、回复、睡眠巩固、CLI
   checkers.py    按类型分流的内容钩子（技能类一致性校验）
+  instructions.py 开工注入 / AGENTS.md 导出（CLI 与 MCP 共用的单一实现）
+  mcp_server.py  MCP 服务器（stdio，九个工具；需 pip install memagent-local[mcp]）
+  server.py      本地 HTTP 服务（纯 stdlib）
   visualize.py   强度曲线可视化（纯 Python 生成 SVG）+ CSV/JSON 导出
   interactive.py 多视图仪表盘（单文件 HTML：曲线/气泡图/分布/Top列表联动）
   profiles.py    记忆类型画像（τ / 再巩固因子 / 压缩阈值配置表）
