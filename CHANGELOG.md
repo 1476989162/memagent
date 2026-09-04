@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### 0.3.5 — dogfood 抓到的 PyPI 用户视角 bug 修复
+
+- **MCP server 无 mcp 包时友好提示**（Bug 1）：之前直接抛 `ModuleNotFoundError`
+  traceback，PyPI 用户跑 `python -m memagent.mcp_server` 看不到可操作指令。
+  现在 ImportError 时 `sys.exit(2)` 并在 stderr 打印
+  `pip install memagent-local[mcp]`，exit_code=2 区别于 traceback 的 1。
+  测试：`tests/test_mcp_missing.py` 用 sys.path shadow 目录模拟无 mcp 场景，
+  不依赖真实 uninstall mcp 包。
+- **新增 `embed-fastembed` extra**（Bug 2）：`--embed-fastembed` CLI 参数
+  之前没对应 pip extra，用户得手动 `pip install fastembed`。
+  `pyproject.toml` 增加 `embed-fastembed = ["fastembed>=0.3"]`。
+- **新增 pyproject extras**：`embed-fastembed`（轻量 ONNX，无 torch）与既有
+  `embed-local`（sentence-transformers，含 torch 重依赖）并列。
+- 版本号与 CHANGELOG 同步：`__version__` → 0.3.5。
+- **未修 Bug 3**：MCP 工具参数返回 "Invalid request parameters" 是 Hermes MCP
+  client 侧问题，非 server 代码。已记为 P1 启动信号，等外部用户反馈。
+
 ### 0.3.4 — LICENSE 转 MIT + PyPI 公开发布准备
 
 - **LICENSE 转为 MIT**：从 `LicenseRef-Proprietary` 改为 `MIT`，

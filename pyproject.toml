@@ -22,10 +22,12 @@ classifiers = [
 
 [project.optional-dependencies]
 # 核心保持零依赖；各服务入口按需安装：
-#   pip install memagent-local[mcp]         → MCP 服务器（memagent.mcp_server）
-#   pip install memagent-local[embed-local] → 本地语义嵌入（sentence-transformers）
+#   pip install memagent-local[mcp]              → MCP 服务器（memagent.mcp_server）
+#   pip install memagent-local[embed-local]      → 本地语义嵌入（sentence-transformers）
+#   pip install memagent-local[embed-fastembed]  → 本地 ONNX 嵌入（fastembed，轻量无 torch）
 mcp = ["mcp>=1.2"]
 embed-local = ["sentence-transformers>=3,<6"]
+embed-fastembed = ["fastembed>=0.3"]
 dev = ["pytest>=8,<10", "build>=1.2,<2", "twine>=5,<7"]
 
 [project.scripts]

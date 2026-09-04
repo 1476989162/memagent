@@ -27,9 +27,19 @@ import sys
 import time
 from pathlib import Path
 
-import mcp.server.stdio
-import mcp.types as types
-from mcp.server.lowlevel import Server
+try:
+    import mcp.server.stdio  # type: ignore
+    import mcp.types as types  # type: ignore
+    from mcp.server.lowlevel import Server  # type: ignore
+except ImportError:  # pragma: no cover - 可选依赖 [mcp] 未安装时给出可操作提示
+    sys.stderr.write(
+        "memagent MCP 服务器需要 mcp SDK：\n"
+        "    pip install memagent-local[mcp]\n"
+        "（核心 memagent 保持零依赖；只有 MCP 入口需要 [mcp] extra）\n"
+    )
+    sys.exit(2)
+
+# ponytail: 缺 mcp 时报错退出而非抛 traceback——用户能看到可操作的安装命令。
 
 # 检索置信阈值：relevance 低于该值视为"无高置信命中"。符号哈希嵌入下
 # 无关文本的相似度回到 0 附近，该阈值能把"真查不到"诚实暴露给调用方，
