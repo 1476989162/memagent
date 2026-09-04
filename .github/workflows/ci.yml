@@ -54,7 +54,7 @@ jobs:
           python -m memagent.release install --wheel "$wheel" --runtime .ci-runtime
           python -m memagent.release run --runtime .ci-runtime -- --version
           python -m memagent.release status --runtime .ci-runtime
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: memagent-local-wheel
           path: release-artifacts/
