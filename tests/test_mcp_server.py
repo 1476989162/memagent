@@ -8,9 +8,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import mcp.types as types
+try:
+    import mcp.types as types  # type: ignore
+except ImportError:  # pragma: no cover - 可选依赖 [mcp] 未安装时整个测试跳过
+    import pytest
+    pytest.skip("mcp optional dependency not installed (pip install memagent-local[mcp])",
+                allow_module_level=True)
 
-from memagent.mcp_server import build_server
+from memagent.mcp_server import build_server  # noqa: E402
 
 EXPECTED_TOOLS = [
     "memagent_export", "memagent_find", "memagent_forget",
