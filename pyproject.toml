@@ -9,7 +9,7 @@ description = "Local-first layered memory and autonomous learning engine"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{name = "memagent contributors"}]
-license = "LicenseRef-Proprietary"
+license = "MIT"
 license-files = ["LICENSE"]
 keywords = ["agent", "memory", "local-first", "llm", "autonomous-learning"]
 dependencies = []

@@ -4,6 +4,9 @@
 
 ### 0.3.3 — sensenova 推理模型 max_tokens 地板修复 + MCP/REST/人脑认知模块入主干
 
+- **LICENSE 转为 MIT**（v0.3.3 发布决策）：从 `LicenseRef-Proprietary` 改为 `MIT`，
+  `pyproject.toml` `license = "MIT"`。为后续 PyPI 公开发布做准备。企业功能
+  （审计/合规/SLA）按 ROADMAP P2 计划不进开源仓库，走单独私有分发。
 - **sensenova 推理模型 max_tokens 修复**：`responder.py` 只对真正开启 reasoning 的
   sensenova 模型（`model_thinking == "enabled"`）强制 16384 地板；非推理模型
   （如 `sensenova-6.8-flash-lite`）保持 1024 默认。用户显式传 `max_tokens`
