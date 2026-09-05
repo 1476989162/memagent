@@ -26,7 +26,7 @@ classifiers = [
 #   pip install memagent-local[embed-local]      → 本地语义嵌入（sentence-transformers）
 #   pip install memagent-local[embed-fastembed]  → 本地 ONNX 嵌入（fastembed，轻量无 torch）
 mcp = ["mcp>=1.2"]
-embed-local = ["sentence-transformers>=3,<6"]
+embed-local = ["sentence-transformers>=3,<7"]
 embed-fastembed = ["fastembed>=0.3"]
 dev = ["pytest>=8,<10", "build>=1.2,<2", "twine>=5,<7"]
 
