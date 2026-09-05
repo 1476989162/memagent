@@ -6,6 +6,8 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/memagent-local)](https://pypi.org/project/memagent-local/)
 
+**英文 README**: [README.en.md](README.en.md)
+
 一个**零第三方依赖**（纯 Python 标准库）的记忆 Agent 原型，把人类记忆的
 几个核心机制搬进代码：分层存储、遗忘曲线、检索强化、睡眠巩固、索引唤醒。
 
