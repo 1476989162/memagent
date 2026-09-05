@@ -14,4 +14,4 @@ from .memory import Memory, Tier, MemoryStore
 from .embedding import embed_text, cosine_similarity
 
 __all__ = ["MemoryAgent", "Memory", "Tier", "MemoryStore", "embed_text", "cosine_similarity"]
-__version__ = "0.3.5"
+__version__ = "0.3.6"

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "memagent-local"
 dynamic = ["version"]
 description = "Local-first layered memory and autonomous learning engine"
-readme = "README.md"
+readme = "README.en.md"
 requires-python = ">=3.10"
 authors = [{name = "memagent contributors"}]
 license = "MIT"

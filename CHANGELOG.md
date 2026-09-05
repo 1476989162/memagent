@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### 0.3.6 — PyPI 描述切到英文 README
+
+- **PyPI 描述切到 `README.en.md`**：`pyproject.toml` `readme` 字段从
+  `README.md`（中文）改为 `README.en.md`（英文）。PyPI 用户绝大多数是
+  国际开发者，英文 README 更易读；中文用户进 GitHub 仓库看中文 README，
+  两边都不吃亏。
+- **新增 `README.en.md`**：面向国际用户的精简英文文档——问题陈述（为什么
+  MemGPT/Mem0/Zep 的固定参数不够）、差异化（自学习遗忘曲线 vs 固定参数）、
+  安装/快速开始/三个入口、License、CTA 找早期用户。
+- **中文 README 顶部加英文链接**：英文用户能快速切换。
+- **GitHub 描述更新**：中英双语 "memagent — human-brain memory for LLM agents.
+  仿人脑记忆系统..."。
+- `__version__` → 0.3.6。
+
 ### 0.3.5 — dogfood 抓到的 PyPI 用户视角 bug 修复
 
 - **MCP server 无 mcp 包时友好提示**（Bug 1）：之前直接抛 `ModuleNotFoundError`
