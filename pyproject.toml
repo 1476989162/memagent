@@ -28,7 +28,7 @@ classifiers = [
 mcp = ["mcp>=1.2"]
 embed-local = ["sentence-transformers>=3,<6"]
 embed-fastembed = ["fastembed>=0.3"]
-dev = ["pytest>=8,<10", "build>=1.2,<2", "twine>=5,<7"]
+dev = ["pytest>=8,<10", "build>=1.2,<2", "twine>=5,<8"]
 
 [project.scripts]
 memagent = "memagent.__main__:main"
